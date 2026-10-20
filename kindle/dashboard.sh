@@ -11,9 +11,12 @@
 #             e rilegge periodicamente lo stato delle luci
 #   - poller: legge /status dall'Arduino e ridisegna ora, meteo e Spotify
 # Ogni zona dello schermo viene ridisegnata solo se il suo contenuto è cambiato.
+# Il tasto Home mostra i QR (WiFi ospiti e webapp); un tasto qualsiasi torna indietro.
 
 DIR=$(cd "$(dirname "$0")" && pwd)
 . "$DIR/config.sh"
+QR_DIR=${QR_DIR:-$DIR/qr}   # generata da tools/make_qr.py
+[ -f "$QR_DIR/info.sh" ] && . "$QR_DIR/info.sh"
 
 RUN=${RUN:-/tmp/dashboard}
 FBINK=${PREVIEW_FBINK:-$FBINK}
@@ -22,11 +25,12 @@ SCREEN_H=800
 MARGIN=30
 
 # Zone dello schermo: y di partenza e altezza
-HDR_Y=0;   HDR_H=160
-WX_Y=160;  WX_H=220
-SP_Y=380;  SP_H=140
-PR_Y=520;  PR_H=50
-LT_Y=575;  ROW_H=75
+HDR_Y=0;   HDR_H=150
+WX_Y=150;  WX_H=215
+SP_Y=365;  SP_H=132
+PR_Y=497;  PR_H=40
+LT_Y=540;  ROW_H=72
+LG_Y=760;  LG_H=40
 
 if command -v usleep >/dev/null 2>&1; then
   tick() { usleep 250000; }
@@ -64,9 +68,17 @@ load_lights() {
   IFS=$old_ifs
 }
 
-# changed ZONA FIRMA: vero se la zona va ridisegnata
+qr_mode() {
+  local mode=""
+  [ -f "$RUN/mode" ] && read -r mode < "$RUN/mode"
+  [ "$mode" = qr ]
+}
+
+# changed ZONA FIRMA: vero se la zona va ridisegnata. Con i QR a schermo non
+# si disegna nulla: all'uscita si ridisegna tutto.
 changed() {
   local old=""
+  qr_mode && return 1
   [ -f "$RUN/cache_$1" ] && read -r old < "$RUN/cache_$1"
   [ "$old" = "$2" ] && return 1
   printf '%s\n' "$2" > "$RUN/cache_$1"
@@ -103,10 +115,53 @@ text_c() {
   fb -b -m -t "regular=$3,px=$2,top=$1,bottom=$((SCREEN_H - $1 - $2 * 3 / 2)),left=$MARGIN,right=$MARGIN" "$4"
 }
 
+# Rettangolo pieno nero (per le linee): rect TOP LEFT WIDTH HEIGHT
+rect() { fb -b -B BLACK -k "top=$1,left=$2,width=$3,height=$4"; }
+
+# image FILE TOP: PNG centrato orizzontalmente
+image() { fb -b -g "file=$1,y=$2,halign=CENTER"; }
+
 full_refresh() {
   rm -f "$RUN"/cache_*
   fb -c -f
+  draw_legend
   draw_lights
+}
+
+# Fascia in basso con la legenda dei tasti sotto lo schermo
+draw_legend() {
+  zone_clear $LG_Y $LG_H
+  rect $LG_Y $MARGIN $((SCREEN_W - 2 * MARGIN)) 2
+  text_c $((LG_Y + 10)) 18 "$FONT" "$LEGEND"
+  zone_refresh $LG_Y $LG_H
+}
+
+# ---------- QR ----------
+
+show_qr() {
+  echo qr > "$RUN/mode"
+  date +%s > "$RUN/qr_since"
+  fb -b -c
+  if [ -f "$QR_DIR/wifi.png" ]; then
+    text_c 18 34 "$FONT_BOLD" "WiFi ospiti"
+    image "$QR_DIR/wifi.png" 68
+    text_c 378 24 "$FONT" "Rete: $QR_WIFI_SSID"
+    [ -n "$QR_WIFI_PASS" ] && text_c 410 24 "$FONT" "Password: $QR_WIFI_PASS"
+    text_c 468 30 "$FONT_BOLD" "Controlla la casa"
+    image "$QR_DIR/app.png" 512
+    text_c 718 20 "$FONT" "$QR_APP_URL"
+  else
+    text_c 300 28 "$FONT" "QR non configurati:"
+    text_c 345 22 "$FONT" "esegui tools/make_qr.py sul PC"
+  fi
+  text_c 762 18 "$FONT" "Premi un tasto per tornare"
+  fb -f -s "top=0,left=0,width=$SCREEN_W,height=$SCREEN_H"
+}
+
+hide_qr() {
+  echo dash > "$RUN/mode"
+  full_refresh
+  touch "$RUN/poll_now"
 }
 
 # ---------- luci ----------
@@ -120,10 +175,10 @@ draw_light_row() { # INDICE
   if [ "$on" = 1 ]; then pct="$b%"; segs=$(((b + 5) / 10)); else pct="spenta"; segs=0; fi
   y=$((LT_Y + (i - 1) * ROW_H))
   zone_clear $y $ROW_H
-  text $((y + 8)) 30 "$FONT_BOLD" $MARGIN 370 "$name"
-  text $((y + 46)) 18 "$FONT" $MARGIN 370 "$hint"
-  text $((y + 24)) 22 "$FONT" 250 130 "$(bar $segs 10)"
-  text $((y + 18)) 30 "$FONT" 480 10 "$pct"
+  text $((y + 6)) 30 "$FONT_BOLD" $MARGIN 370 "$name"
+  text $((y + 44)) 18 "$FONT" $MARGIN 370 "$hint"
+  text $((y + 22)) 22 "$FONT" 250 130 "$(bar $segs 10)"
+  text $((y + 16)) 30 "$FONT" 480 10 "$pct"
   zone_refresh $y $ROW_H
 }
 
@@ -252,7 +307,7 @@ draw_header() { # OFFLINE
   changed header "$S_time|$date" || return 0
   zone_clear $HDR_Y $HDR_H
   text_c $((HDR_Y + 8)) 90 "$FONT_BOLD" "$S_time"
-  text_c $((HDR_Y + 112)) 28 "$FONT" "$date"
+  text_c $((HDR_Y + 105)) 28 "$FONT" "$date"
   zone_refresh $HDR_Y $HDR_H
 }
 
@@ -272,10 +327,10 @@ draw_weather() {
   zone_clear $WX_Y $WX_H
   if [ "$S_w_ok" = 1 ]; then
     text $((WX_Y + 10)) 50 "$FONT_BOLD" $MARGIN $MARGIN "$S_w_temp°  $S_w_desc"
-    text $((WX_Y + 80)) 22 "$FONT" $MARGIN $MARGIN "Percepita $S_w_feels° · Umidità $S_w_hum% · Vento $S_w_wind km/h"
-    forecast_row $((WX_Y + 120)) "$S_d0"
-    forecast_row $((WX_Y + 152)) "$S_d1"
-    forecast_row $((WX_Y + 184)) "$S_d2"
+    text $((WX_Y + 76)) 22 "$FONT" $MARGIN $MARGIN "Percepita $S_w_feels° · Umidità $S_w_hum% · Vento $S_w_wind km/h"
+    forecast_row $((WX_Y + 116)) "$S_d0"
+    forecast_row $((WX_Y + 147)) "$S_d1"
+    forecast_row $((WX_Y + 178)) "$S_d2"
   else
     text $((WX_Y + 10)) 30 "$FONT" $MARGIN $MARGIN "Meteo non disponibile"
   fi
@@ -292,9 +347,9 @@ draw_spotify() {
 
   if changed spotify "$state|$S_sp_track|$S_sp_artist"; then
     zone_clear $SP_Y $SP_H
-    text $((SP_Y + 12)) 22 "$FONT" $MARGIN $MARGIN "$state"
-    text $((SP_Y + 48)) 36 "$FONT_BOLD" $MARGIN $MARGIN "$S_sp_track"
-    text $((SP_Y + 100)) 26 "$FONT" $MARGIN $MARGIN "$S_sp_artist"
+    text $((SP_Y + 8)) 22 "$FONT" $MARGIN $MARGIN "$state"
+    text $((SP_Y + 38)) 36 "$FONT_BOLD" $MARGIN $MARGIN "$S_sp_track"
+    text $((SP_Y + 90)) 26 "$FONT" $MARGIN $MARGIN "$S_sp_artist"
     zone_refresh $SP_Y $SP_H
   fi
 
@@ -307,13 +362,13 @@ draw_spotify() {
   fi
   if changed progress "$line"; then
     zone_clear $PR_Y $PR_H
-    [ -n "$line" ] && text $((PR_Y + 10)) 22 "$FONT" $MARGIN $MARGIN "$line"
+    [ -n "$line" ] && text $((PR_Y + 6)) 22 "$FONT" $MARGIN $MARGIN "$line"
     zone_refresh $PR_Y $PR_H
   fi
 }
 
 poller() {
-  local fails=0 n polls=0
+  local fails=0 n polls=0 since
   local polls_per_full=$((FULL_REFRESH_MINUTES * 60 / POLL_SECONDS))
   while true; do
     if http_get "http://$ARDUINO_HOST/status" 8 "$RUN/status.new"; then
@@ -323,10 +378,15 @@ poller() {
       fails=$((fails + 1))
     fi
 
-    polls=$((polls + 1))
-    if [ $polls -ge $polls_per_full ]; then
-      polls=0
-      full_refresh
+    if qr_mode; then
+      read -r since < "$RUN/qr_since"
+      [ $(($(date +%s) - since)) -ge "$QR_SECONDS" ] && hide_qr
+    else
+      polls=$((polls + 1))
+      if [ $polls -ge $polls_per_full ]; then
+        polls=0
+        full_refresh
+      fi
     fi
 
     if [ -f "$RUN/status" ]; then
@@ -366,6 +426,10 @@ spotify_cmd() {
 handle_key() { # CODICE VALORE
   local i=1 plus minus
   [ "$2" = 0 ] && return
+  if qr_mode; then           # con i QR a schermo un tasto qualsiasi torna indietro
+    [ "$2" = 1 ] && hide_qr
+    return
+  fi
   while [ $i -le "$NLIGHTS" ]; do
     eval "plus=\$PLUS_$i minus=\$MINUS_$i"
     [ "$1" = "$plus" ] && { adjust_light $i "$STEP"; return; }
@@ -379,6 +443,7 @@ handle_key() { # CODICE VALORE
     "$KEY_PLAY") spotify_cmd toggle ;;
     "$KEY_ALL") toggle_all ;;
     "$KEY_REFRESH") full_refresh; touch "$RUN/poll_now" ;;
+    "$KEY_QR") show_qr ;;
   esac
 }
 
@@ -445,7 +510,7 @@ keytest() {
   wait
 }
 
-# preview FILE_STATO "acc:lum acc:lum ...": disegna una sola schermata
+# preview FILE_STATO "acc:lum acc:lum ..." [qr]: disegna una sola schermata
 preview() {
   local i=1 l
   load_lights
@@ -456,6 +521,10 @@ preview() {
     i=$((i + 1))
   done
   cp "$1" "$RUN/status"
+  if [ "$3" = qr ]; then
+    show_qr
+    return
+  fi
   full_refresh
   load_status
   draw_header 0
@@ -468,6 +537,6 @@ case "$1" in
   stop) stop ;;
   run) run ;;
   keytest) keytest ;;
-  preview) preview "$2" "$3" ;;
+  preview) preview "$2" "$3" "$4" ;;
   *) echo "Uso: sh $0 start|stop|keytest"; exit 1 ;;
 esac

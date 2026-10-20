@@ -7,6 +7,13 @@
     GET /status          stato in formato "chiave=valore", una riga per chiave
     GET /cmd?a=AZIONE    comando Spotify: toggle | play | pause | next | prev
 
+  Serve anche la webapp per il telefono (solo LAN, senza password):
+
+    GET /                          la pagina (webapp.h)
+    GET /api/state                 stato in JSON, luci comprese
+    GET /api/light?i=N&on=1&b=50   accende/spegne/regola la luce N (indice in LIGHTS)
+    GET /api/cmd?a=AZIONE          come /cmd
+
   È anche un device Arduino Cloud: quando va via la corrente il device risulta
   offline e il trigger configurato sul Cloud manda la notifica. Il WiFi lo
   gestisce la libreria Cloud (credenziali dal Network Configurator), quindi
@@ -21,10 +28,20 @@
 #include <ArduinoJson.h>
 #include "arduino_secrets.h"
 #include "https_response.h"
+#include "webapp.h"
 
 // ---- Configurazione ----
 const float LATITUDE = 45.4642;  // cambia con la tua posizione
 const float LONGITUDE = 9.1900;
+
+// Luci per la webapp: stessi canali e nomi di kindle/config.sh
+const char* const SHELLY_HOST = "192.168.1.50";
+struct Light {
+  const char* name;
+  int id;  // canale Shelly (0-3)
+};
+const Light LIGHTS[] = {{"Soggiorno", 0}, {"Cucina", 1}, {"Studio", 2}};
+const int NUM_LIGHTS = sizeof(LIGHTS) / sizeof(LIGHTS[0]);
 
 const unsigned long SPOTIFY_POLL_PLAYING_MS = 5000;
 const unsigned long SPOTIFY_POLL_IDLE_MS = 20000;
@@ -40,6 +57,7 @@ const char* const MONTHS[] = {"gennaio", "febbraio", "marzo", "aprile", "maggio"
 
 WiFiServer server(80);
 WiFiSSLClient tls;
+WiFiClient plain;  // HTTP in chiaro verso lo Shelly
 
 // ---- Stato ----
 struct {
@@ -67,16 +85,16 @@ unsigned long nextSpotifyAt = 0, nextWeatherAt = 0, nextNtpAt = 0;
 
 bool due(unsigned long at) { return (long)(millis() - at) >= 0; }
 
-// ---- HTTPS ----
+// ---- Client HTTP/HTTPS ----
 
-// Esegue una richiesta HTTPS e lascia `tls` posizionato all'inizio del corpo.
+// Esegue una richiesta e lascia `c` posizionato all'inizio del corpo.
 // code = -1 se la connessione fallisce.
-Response httpsRequest(const char* host, const char* method, const String& path,
-                      const String& headers, const String& body) {
+Response httpRequest(Client& c, const char* host, uint16_t port, unsigned long timeoutMs,
+                     const char* method, const String& path, const String& headers, const String& body) {
   Response r;
-  tls.stop();
-  if (!tls.connect(host, 443)) return r;
-  tls.setTimeout(5000);
+  c.stop();
+  if (!c.connect(host, port)) return r;
+  c.setTimeout(timeoutMs);
 
   String req = String(method) + " " + path + " HTTP/1.1\r\n";
   req += "Host: "; req += host; req += "\r\n";
@@ -85,13 +103,13 @@ Response httpsRequest(const char* host, const char* method, const String& path,
   if (strcmp(method, "GET") != 0) req += "Content-Length: " + String(body.length()) + "\r\n";
   req += "\r\n";
   req += body;
-  tls.print(req);
+  c.print(req);
 
-  String status = tls.readStringUntil('\n');
+  String status = c.readStringUntil('\n');
   if (!status.startsWith("HTTP/")) return r;
   r.code = status.substring(status.indexOf(' ') + 1).toInt();
   while (true) {
-    String line = tls.readStringUntil('\n');
+    String line = c.readStringUntil('\n');
     line.trim();
     if (line.length() == 0) break;
     line.toLowerCase();
@@ -99,6 +117,11 @@ Response httpsRequest(const char* host, const char* method, const String& path,
     else if (line.startsWith("content-length:")) r.length = line.substring(15).toInt();
   }
   return r;
+}
+
+Response httpsRequest(const char* host, const char* method, const String& path,
+                      const String& headers, const String& body) {
+  return httpRequest(tls, host, 443, 5000, method, path, headers, body);
 }
 
 // Legge il corpo della risposta decodificando al volo il "chunked", così
@@ -278,6 +301,34 @@ int spotifyCommand(String action) {
   return r.code;
 }
 
+// ---- Shelly (per la webapp) ----
+
+bool shellyRpc(const String& path, JsonDocument& doc) {
+  Response r = httpRequest(plain, SHELLY_HOST, 80, 2000, "GET", path, "", "");
+  bool ok = r.code == 200;
+  if (ok) {
+    BodyStream body(plain, r);
+    ok = !deserializeJson(doc, body);
+  }
+  plain.stop();
+  return ok;
+}
+
+bool shellyGetLight(int id, bool& on, int& brightness) {
+  JsonDocument doc;
+  if (!shellyRpc("/rpc/Light.GetStatus?id=" + String(id), doc)) return false;
+  on = doc["output"] | false;
+  brightness = doc["brightness"] | 0;
+  return true;
+}
+
+bool shellySetLight(int id, bool on, int brightness) {
+  String path = "/rpc/Light.Set?id=" + String(id) + "&on=" + (on ? "true" : "false");
+  if (on) path += "&brightness=" + String(constrain(brightness, 1, 100));
+  JsonDocument doc;
+  return shellyRpc(path, doc);
+}
+
 // ---- Meteo (Open-Meteo, senza chiave API) ----
 
 const char* weatherDesc(int c) {
@@ -371,7 +422,29 @@ void civilFromDays(long z, int& m, int& d) {
   m = mp < 10 ? mp + 3 : mp - 9;
 }
 
-// ---- Server HTTP per il Kindle ----
+// Ora e data locali. false finché non ci sono sia l'NTP sia il fuso orario,
+// che arriva insieme al meteo.
+bool localClock(long& today, String& time, String& date) {
+  if (epochAtSync == 0 || !wx.ok) return false;
+  unsigned long local = epochAtSync + (millis() - millisAtSync) / 1000 + wx.utcOffset;
+  today = local / 86400;
+  unsigned long sec = local % 86400;
+  char hhmm[6];
+  snprintf(hhmm, sizeof hhmm, "%02lu:%02lu", sec / 3600, sec / 60 % 60);
+  int m, d;
+  civilFromDays(today, m, d);
+  time = hhmm;
+  date = String(WEEKDAYS[(today + 4) % 7]) + " " + d + " " + MONTHS[m - 1];
+  return true;
+}
+
+long spotifyProgressMs() {
+  long progress = sp.progressMs;
+  if (sp.playing) progress += millis() - sp.fetchedAt;
+  return min(progress, sp.durationMs);
+}
+
+// ---- Server HTTP per Kindle e webapp ----
 
 // Una riga "chiave=valore"; i valori non devono contenere a capo.
 void kv(String& s, const char* key, String value) {
@@ -392,22 +465,11 @@ String decimalComma(float v) {
 String buildStatus() {
   String s;
   s.reserve(700);
-  bool timeOk = epochAtSync != 0 && wx.ok;  // serve il fuso orario dal meteo
   long today = -1;
-  if (timeOk) {
-    unsigned long local = epochAtSync + (millis() - millisAtSync) / 1000 + wx.utcOffset;
-    today = local / 86400;
-    unsigned long sec = local % 86400;
-    char hhmm[6];
-    snprintf(hhmm, sizeof hhmm, "%02lu:%02lu", sec / 3600, sec / 60 % 60);
-    int m, d;
-    civilFromDays(today, m, d);
-    kv(s, "time", hhmm);
-    kv(s, "date", String(WEEKDAYS[(today + 4) % 7]) + " " + d + " " + MONTHS[m - 1]);
-  } else {
-    kv(s, "time", "--:--");
-    kv(s, "date", "");
-  }
+  String time = "--:--", date;
+  localClock(today, time, date);
+  kv(s, "time", time);
+  kv(s, "date", date);
 
   kv(s, "w_ok", wx.ok ? "1" : "0");
   if (wx.ok) {
@@ -423,24 +485,96 @@ String buildStatus() {
     }
   }
 
-  long progress = sp.progressMs;
-  if (sp.playing) progress += millis() - sp.fetchedAt;
-  if (progress > sp.durationMs) progress = sp.durationMs;
   kv(s, "sp_ok", sp.configured && sp.ok ? "1" : "0");
   kv(s, "sp_active", sp.active ? "1" : "0");
   kv(s, "sp_playing", sp.playing ? "1" : "0");
   kv(s, "sp_track", sp.track);
   kv(s, "sp_artist", sp.artist);
-  kv(s, "sp_progress", String(progress / 1000));
+  kv(s, "sp_progress", String(spotifyProgressMs() / 1000));
   kv(s, "sp_duration", String(sp.durationMs / 1000));
   return s;
 }
 
-void sendText(WiFiClient& c, int code, const String& body) {
+// Stato per la webapp. Le luci si leggono dallo Shelly a ogni richiesta, così
+// si vedono anche le modifiche fatte dal Kindle o dall'app Shelly.
+String buildApiState() {
+  JsonDocument doc;
+  long today;
+  String time = "--:--", date;
+  localClock(today, time, date);
+  doc["time"] = time;
+  doc["date"] = date;
+
+  JsonObject w = doc["w"].to<JsonObject>();
+  w["ok"] = wx.ok;
+  if (wx.ok) {
+    w["temp"] = decimalComma(wx.temp);
+    w["desc"] = weatherDesc(wx.code);
+  }
+
+  JsonArray lights = doc["lights"].to<JsonArray>();
+  for (int i = 0; i < NUM_LIGHTS; i++) {
+    JsonObject l = lights.add<JsonObject>();
+    l["name"] = LIGHTS[i].name;
+    bool on;
+    int b;
+    if (shellyGetLight(LIGHTS[i].id, on, b)) {
+      l["on"] = on;
+      l["b"] = b;
+    } else {
+      l["ok"] = false;
+    }
+  }
+
+  JsonObject s = doc["sp"].to<JsonObject>();
+  s["ok"] = sp.configured && sp.ok;
+  s["active"] = sp.active;
+  s["playing"] = sp.playing;
+  s["track"] = sp.track;
+  s["artist"] = sp.artist;
+  s["progress"] = spotifyProgressMs() / 1000;
+  s["duration"] = sp.durationMs / 1000;
+
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
+void sendText(WiFiClient& c, int code, const String& body,
+              const char* type = "text/plain; charset=utf-8") {
   c.print("HTTP/1.1 " + String(code) + (code == 200 ? " OK" : " Error") + "\r\n"
-          "Content-Type: text/plain; charset=utf-8\r\n"
+          "Content-Type: " + type + "\r\n"
+          "Cache-Control: no-store\r\n"
           "Connection: close\r\n"
           "Content-Length: " + String(body.length()) + "\r\n\r\n" + body);
+}
+
+void sendWebapp(WiFiClient& c) {
+  size_t len = strlen(WEBAPP_HTML);
+  c.print("HTTP/1.1 200 OK\r\n"
+          "Content-Type: text/html; charset=utf-8\r\n"
+          "Connection: close\r\n"
+          "Content-Length: " + String(len) + "\r\n\r\n");
+  for (size_t off = 0; off < len; off += 1024) {
+    c.write((const uint8_t*)WEBAPP_HTML + off, len - off < 1024 ? len - off : 1024);
+  }
+}
+
+// Valore di un parametro della query string ("" se assente)
+String queryParam(const String& path, const char* name) {
+  String key = String(name) + "=";
+  int start = path.indexOf('?') + 1;
+  while (start > 0) {
+    int end = path.indexOf('&', start);
+    if (path.startsWith(key, start)) return path.substring(start + key.length(), end < 0 ? path.length() : end);
+    start = end + 1;
+  }
+  return "";
+}
+
+void sendCommandResult(WiFiClient& c, int code) {
+  bool ok = code >= 200 && code < 300;
+  sendText(c, ok ? 200 : 502, ok ? "ok\n" : "errore " + String(code) + "\n");
 }
 
 void handleClient() {
@@ -457,10 +591,17 @@ void handleClient() {
 
   if (path == "/status") {
     sendText(c, 200, buildStatus());
-  } else if (path.startsWith("/cmd?a=")) {
-    int code = spotifyCommand(path.substring(7));
-    bool ok = code >= 200 && code < 300;
-    sendText(c, ok ? 200 : 502, ok ? "ok\n" : "errore " + String(code) + "\n");
+  } else if (path.startsWith("/cmd?") || path.startsWith("/api/cmd?")) {
+    sendCommandResult(c, spotifyCommand(queryParam(path, "a")));
+  } else if (path == "/" || path.startsWith("/?")) {
+    sendWebapp(c);
+  } else if (path == "/api/state") {
+    sendText(c, 200, buildApiState(), "application/json");
+  } else if (path.startsWith("/api/light?")) {
+    int i = queryParam(path, "i").toInt();
+    bool valid = queryParam(path, "i").length() > 0 && i >= 0 && i < NUM_LIGHTS;
+    bool ok = valid && shellySetLight(LIGHTS[i].id, queryParam(path, "on") == "1", queryParam(path, "b").toInt());
+    sendCommandResult(c, valid ? (ok ? 200 : 502) : 400);
   } else {
     sendText(c, 404, "non trovato\n");
   }
@@ -492,7 +633,7 @@ void loop() {
     serverStarted = true;
     Serial.print("Gateway pronto: http://");
     Serial.print(WiFi.localIP());
-    Serial.println("/status");
+    Serial.println("/");
   }
 
   handleClient();

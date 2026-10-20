@@ -21,9 +21,14 @@ KEY_NEXT=106      # joystick destra:   brano successivo
 KEY_PLAY=194      # joystick centro:   play/pausa
 KEY_ALL=158       # Indietro: spegne tutte le luci / le riaccende
 KEY_REFRESH=139   # Menu: refresh completo dello schermo
+KEY_QR=102        # Home: QR del WiFi ospiti e della webapp
+
+# Legenda nella fascia in basso (i tasti sotto lo schermo)
+LEGEND="◀ ▶ brano  ·  ● play  ·  ↩ tutte le luci  ·  ⌂ WiFi ospiti"
+QR_SECONDS=120    # dopo quanto la schermata dei QR si chiude da sola
 
 POLL_SECONDS=5          # ogni quanto chiedere lo stato all'Arduino
-SHELLY_SYNC_SECONDS=60  # ogni quanto rileggere le luci (se cambiate dall'app)
+SHELLY_SYNC_SECONDS=15  # ogni quanto rileggere le luci (cambiate da webapp o app Shelly)
 FULL_REFRESH_MINUTES=30 # refresh completo periodico contro il ghosting
 
 DIR_BASE=/mnt/us/dashboard
