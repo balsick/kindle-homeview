@@ -73,6 +73,11 @@ const char* const MONTHS[] = {"gennaio", "febbraio", "marzo", "aprile", "maggio"
 
 WiFiServer server(80);
 const unsigned long ACCEPT_INTERVAL_MS = 50;
+
+// Stack dello sketch (vedi runOnAppStack). Sotto appStack, in memoria, c'è
+// accessToken: con 2 KB lo stack sconfinava sulla String del token e le
+// richieste a Spotify partivano rovinate (400).
+const size_t APP_STACK_BYTES = 2560;  // picco misurato ~1,7 KB
 // Client TLS che legge dal modulo WiFi al massimo SSL_CHUNK byte per volta.
 // WiFiSSLClient ne chiede fino a 1023 e li riceve in una std::string che cresce
 // un byte alla volta: le riallocazioni chiedono un blocco contiguo di ~3 KB.
@@ -154,30 +159,69 @@ unsigned otaRequests = 0;         // il Kindle controlla quando il valore cambia
 bool due(unsigned long at) { return (long)(millis() - at) >= 0; }
 
 // Scrive l'errore sulla seriale e nella variabile lastError del Thing
+// Ultimi errori, con i secondi dall'avvio, per GET /log (buffer statico)
+const int LOG_LINES = 6;
+const int LOG_WIDTH = 80;
+char errLog[LOG_LINES][LOG_WIDTH];
+int errLogNext = 0;
+
 void logError(const String& msg) {
   Serial.println(msg);
   lastError = msg;
+  snprintf(errLog[errLogNext], LOG_WIDTH, "%lu %s", millis() / 1000, msg.c_str());
+  errLogNext = (errLogNext + 1) % LOG_LINES;
 }
 
 // ---- Client HTTP/HTTPS ----
 
+// La richiesta si scrive a pezzi, senza String: con l'heap frammentato le
+// concatenazioni di String falliscono in silenzio e la richiesta partiva
+// malformata (il front end di Google risponde "400 Bad Request"). I pezzi
+// passano da writeBuf e partono a blocchi di WRITE_CHUNK byte: una raffica
+// unica di ~600 byte arrivava a volte rovinata al modulo WiFi.
+const size_t WRITE_CHUNK = 128;
+char writeBuf[WRITE_CHUNK];
+char pathBuf[160];
+
+// Percorso con printf, nel buffer statico pathBuf (vale fino alla prossima chiamata)
+const char* fmtPath(const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(pathBuf, sizeof(pathBuf), fmt, ap);
+  va_end(ap);
+  return pathBuf;
+}
+
 // Esegue una richiesta e lascia `c` posizionato all'inizio del corpo.
-// code = -1 se la connessione fallisce.
+// headers e body sono elenchi di pezzi da concatenare, chiusi da nullptr
+// (le righe di intestazione finiscono con "\r\n"). code = -1 se fallisce.
 Response httpRequest(Client& c, const char* host, uint16_t port, unsigned long timeoutMs,
-                     const char* method, const String& path, const String& headers, const String& body) {
+                     const char* method, const char* path, const char* const* headers,
+                     const char* const* body) {
   Response r;
   c.stop();
   if (!c.connect(host, port)) return r;
   c.setTimeout(timeoutMs);
 
-  String req = String(method) + " " + path + " HTTP/1.1\r\n";
-  req += "Host: "; req += host; req += "\r\n";
-  req += "Connection: close\r\n";
-  req += headers;
-  if (strcmp(method, "GET") != 0) req += "Content-Length: " + String(body.length()) + "\r\n";
-  req += "\r\n";
-  req += body;
-  c.print(req);
+  size_t n = 0, bodyLen = 0;
+  auto put = [&](const char* s) {
+    while (*s) {
+      writeBuf[n++] = *s++;
+      if (n == WRITE_CHUNK) { c.write((const uint8_t*)writeBuf, n); n = 0; }
+    }
+  };
+  for (const char* const* b = body; b && *b; b++) bodyLen += strlen(*b);
+  put(method); put(" "); put(path); put(" HTTP/1.1\r\nHost: "); put(host);
+  put("\r\nConnection: close\r\n");
+  for (const char* const* h = headers; h && *h; h++) put(*h);
+  if (strcmp(method, "GET") != 0) {
+    char len[32];
+    snprintf(len, sizeof(len), "Content-Length: %u\r\n", (unsigned)bodyLen);
+    put(len);
+  }
+  put("\r\n");
+  for (const char* const* b = body; b && *b; b++) put(*b);
+  if (n) c.write((const uint8_t*)writeBuf, n);
 
   String status = c.readStringUntil('\n');
   if (!status.startsWith("HTTP/")) return r;
@@ -193,8 +237,8 @@ Response httpRequest(Client& c, const char* host, uint16_t port, unsigned long t
   return r;
 }
 
-Response httpsRequest(const char* host, const char* method, const String& path,
-                      const String& headers, const String& body) {
+Response httpsRequest(const char* host, const char* method, const char* path,
+                      const char* const* headers = nullptr, const char* const* body = nullptr) {
   return httpRequest(tls, host, 443, 5000, method, path, headers, body);
 }
 
@@ -289,10 +333,10 @@ String base64(const String& in) {
 // ---- Spotify ----
 
 bool refreshSpotifyToken() {
-  String headers = "Authorization: Basic " + basicAuth + "\r\n"
-                   "Content-Type: application/x-www-form-urlencoded\r\n";
-  Response r = httpsRequest("accounts.spotify.com", "POST", "/api/token", headers,
-                            "grant_type=refresh_token&refresh_token=" + refreshToken);
+  const char* headers[] = {"Authorization: Basic ", basicAuth.c_str(),
+                           "\r\nContent-Type: application/x-www-form-urlencoded\r\n", nullptr};
+  const char* body[] = {"grant_type=refresh_token&refresh_token=", refreshToken.c_str(), nullptr};
+  Response r = httpsRequest("accounts.spotify.com", "POST", "/api/token", headers, body);
   // Risposta piccola: la leggiamo tutta prima del parsing, come per il meteo
   String json = r.code > 0 ? readBody(tls, r, TOKEN_MAX_BYTES) : String();
   tls.stop();
@@ -319,12 +363,13 @@ bool refreshSpotifyToken() {
 }
 
 // Chiama la Web API. Dopo la chiamata il corpo è da leggere da `tls`.
-Response spotifyApi(const char* method, const String& path, const String& body = "") {
+// path può stare in pathBuf (fmtPath): il rinnovo del token non lo tocca
+Response spotifyApi(const char* method, const char* path, const char* const* body = nullptr) {
   if (accessToken.length() == 0 || millis() - tokenAt > tokenValidMs) {
     if (!refreshSpotifyToken()) return Response();
   }
-  String headers = "Authorization: Bearer " + accessToken + "\r\n";
-  if (body.length()) headers += "Content-Type: application/json\r\n";
+  const char* headers[] = {"Authorization: Bearer ", accessToken.c_str(), "\r\n",
+                           body ? "Content-Type: application/json\r\n" : "", nullptr};
   Response r = httpsRequest("api.spotify.com", method, path, headers, body);
   if (r.code == 401) accessToken = "";  // token scaduto: si rinnova alla prossima chiamata
   return r;
@@ -409,11 +454,11 @@ int spotifyStartAtHome() {
     logError(String("Spotify: ") + SPOTIFY_HOME_DEVICE + " non trovato tra i dispositivi");
     return 404;
   }
-  Response r = spotifyApi("PUT", "/v1/me/player/play?device_id=" + id);
+  Response r = spotifyApi("PUT", fmtPath("/v1/me/player/play?device_id=%s", id.c_str()));
   tls.stop();
   if ((r.code < 200 || r.code >= 300) && strlen(SPOTIFY_FALLBACK_CONTEXT) > 0) {
-    r = spotifyApi("PUT", "/v1/me/player/play?device_id=" + id,
-                   String("{\"context_uri\":\"") + SPOTIFY_FALLBACK_CONTEXT + "\"}");
+    const char* body[] = {"{\"context_uri\":\"", SPOTIFY_FALLBACK_CONTEXT, "\"}", nullptr};
+    r = spotifyApi("PUT", fmtPath("/v1/me/player/play?device_id=%s", id.c_str()), body);
     tls.stop();
   }
   if (r.code < 200 || r.code >= 300) logError("Spotify: avvio a casa fallito, HTTP " + String(r.code));
@@ -446,10 +491,15 @@ int spotifyCommand(String action, const String& value) {
   } else if (action == "vol") {
     if (sp.volume < 0) return 409;  // questo dispositivo non regola il volume
     int v = constrain(value.toInt(), 0, 100);
-    r = spotifyApi("PUT", "/v1/me/player/volume?volume_percent=" + String(v));
+    r = spotifyApi("PUT", fmtPath("/v1/me/player/volume?volume_percent=%d", v));
     if (r.code >= 200 && r.code < 300) sp.volume = v;
   } else {
     return 400;
+  }
+  if (r.code < 200 || r.code >= 300) {
+    // Il messaggio di Spotify dice il perché (dispositivo, Premium, richiesta…)
+    String msg = r.code > 0 ? readBody(tls, r, 512) : String();
+    logError("Spotify: " + action + " fallito, HTTP " + String(r.code) + " " + msg.substring(0, 120));
   }
   tls.stop();
 
@@ -463,9 +513,9 @@ int spotifyCommand(String action, const String& value) {
 
 // ---- Shelly (per la webapp) ----
 
-bool shellyRpc(const String& path, JsonDocument& doc) {
+bool shellyRpc(const char* path, JsonDocument& doc) {
   WiFiClient plain;  // HTTP in chiaro verso lo Shelly
-  Response r = httpRequest(plain, SHELLY_HOST, 80, 2000, "GET", path, "", "");
+  Response r = httpRequest(plain, SHELLY_HOST, 80, 2000, "GET", path, nullptr, nullptr);
   bool ok = r.code == 200;
   if (ok) {
     BodyStream body(plain, r);
@@ -477,15 +527,15 @@ bool shellyRpc(const String& path, JsonDocument& doc) {
 
 bool shellyGetLight(int id, bool& on, int& brightness) {
   JsonDocument doc;
-  if (!shellyRpc("/rpc/Light.GetStatus?id=" + String(id), doc)) return false;
+  if (!shellyRpc(fmtPath("/rpc/Light.GetStatus?id=%d", id), doc)) return false;
   on = doc["output"] | false;
   brightness = doc["brightness"] | 0;
   return true;
 }
 
 bool shellySetLight(int id, bool on, int brightness) {
-  String path = "/rpc/Light.Set?id=" + String(id) + "&on=" + (on ? "true" : "false");
-  if (on) path += "&brightness=" + String(constrain(brightness, 1, 100));
+  const char* path = on ? fmtPath("/rpc/Light.Set?id=%d&on=true&brightness=%d", id, constrain(brightness, 1, 100))
+                        : fmtPath("/rpc/Light.Set?id=%d&on=false", id);
   JsonDocument doc;
   return shellyRpc(path, doc);
 }
@@ -518,17 +568,24 @@ const char* weatherDesc(int c) {
   }
 }
 
+// Il percorso del meteo non cambia: si compone una volta all'avvio
+char weatherPath[280];  // ~256 caratteri con le coordinate di Torino
+
+void buildWeatherPath() {
+  char lat[16], lon[16];
+  dtostrf(LATITUDE, 1, 4, lat);
+  dtostrf(LONGITUDE, 1, 4, lon);
+  snprintf(weatherPath, sizeof(weatherPath),
+           "/v1/forecast?latitude=%s&longitude=%s"
+           "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m"
+           "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+           "&timezone=auto&forecast_days=3", lat, lon);
+}
+
 void updateWeather() {
-  String path = "/v1/forecast?latitude=";
-  path += String(LATITUDE, 4);
-  path += "&longitude=";
-  path += String(LONGITUDE, 4);
-  path += "&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m"
-          "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-          "&timezone=auto&forecast_days=3";
 
   Serial.println("Meteo: aggiornamento");
-  Response r = httpsRequest("api.open-meteo.com", "GET", path, "", "");
+  Response r = httpsRequest("api.open-meteo.com", "GET", weatherPath);
   bool ok = false;
   if (r.code == 200) {
     // La risposta è piccola (~1 KB): la leggiamo tutta e chiudiamo la
@@ -772,12 +829,11 @@ long releaseNumber(const String& tag) {
   return tag.substring(n).toInt();
 }
 
-Response githubApi(const String& path, const char* accept) {
-  return httpsRequest("api.github.com", "GET", path,
-                      String("Authorization: Bearer ") + SECRET_GITHUB_TOKEN + "\r\n"
-                      "Accept: " + accept + "\r\n"
-                      "User-Agent: kindle-homeview\r\n"
-                      "X-GitHub-Api-Version: 2022-11-28\r\n", "");
+Response githubApi(const char* path, const char* accept) {
+  const char* headers[] = {"Authorization: Bearer ", SECRET_GITHUB_TOKEN, "\r\nAccept: ", accept,
+                           "\r\nUser-Agent: kindle-homeview\r\nX-GitHub-Api-Version: 2022-11-28\r\n",
+                           nullptr};
+  return httpsRequest("api.github.com", "GET", path, headers);
 }
 
 void sendLatestVersion(WiFiClient& c) {
@@ -785,7 +841,7 @@ void sendLatestVersion(WiFiClient& c) {
     sendText(c, 503, "OTA non configurato: manca SECRET_GITHUB_TOKEN\n");
     return;
   }
-  Response r = githubApi(String("/repos/") + GITHUB_REPO + "/git/matching-refs/tags/" + OTA_TAG_PREFIX,
+  Response r = githubApi(fmtPath("/repos/%s/git/matching-refs/tags/%s", GITHUB_REPO, OTA_TAG_PREFIX),
                          "application/vnd.github+json");
   String latest;
   long best = -1;
@@ -822,7 +878,7 @@ void sendRepoFile(WiFiClient& c, const String& tag, const String& path) {
     sendText(c, 400, "richiesta non valida\n");
     return;
   }
-  Response r = githubApi(String("/repos/") + GITHUB_REPO + "/contents/" + path + "?ref=" + tag,
+  Response r = githubApi(fmtPath("/repos/%s/contents/%s?ref=%s", GITHUB_REPO, path.c_str(), tag.c_str()),
                          "application/vnd.github.raw");
   if (r.code != 200) {
     tls.stop();
@@ -875,6 +931,22 @@ void handleClient() {
     sendCommandResult(c, spotifyCommand(queryParam(path, "a"), queryParam(path, "v")));
   } else if (path == "/" || path.startsWith("/?")) {
     sendWebapp(c);
+  } else if (path == "/log") {
+    struct mallinfo mi = mallinfo();
+    size_t lo = 0, hi = 16384;  // blocco contiguo più grande (ricerca binaria)
+    while (lo < hi) {
+      size_t mid = (lo + hi + 1) / 2;
+      void* q = malloc(mid);
+      if (q) { free(q); lo = mid; } else hi = mid - 1;
+    }
+    String s = "secondi dall'avvio: " + String(millis() / 1000) + "\nstack libero (minimo): " +
+               String(stackFreeBytes()) + " B su " + String(APP_STACK_BYTES) + "\nheap libero: " +
+               String(mi.fordblks) + " B nell'arena, blocco max " + String(lo) + " B\n";
+    for (int i = 0; i < LOG_LINES; i++) {
+      const char* line = errLog[(errLogNext + i) % LOG_LINES];
+      if (line[0]) { s += line; s += "\n"; }
+    }
+    sendText(c, 200, s);
   } else if (path == "/api/state") {
     sendText(c, 200, buildApiState(), "application/json");
   } else if (path.startsWith("/api/light?")) {
@@ -945,7 +1017,7 @@ void startWatchdog() {
 void reportResetCause() {
   if (R_SYSTEM->RSTSR1_b.WDTRF)
     lastReset = "watchdog (loop bloccata)";
-  else if (R_SYSTEM->RSTSR1_b.SWRF) lastReset = "software (aggiornamento o Cloud scollegato)";
+  else if (R_SYSTEM->RSTSR1_b.SWRF) lastReset = "software (aggiornamento, Cloud scollegato o stack esaurito)";
   else lastReset = "accensione o tasto reset";
   R_SYSTEM->RSTSR1 = 0;
   Serial.println("Riavvio: " + lastReset);
@@ -954,6 +1026,13 @@ void reportResetCause() {
 void updateDiagnostics() {
   static unsigned long memLogAt = 0;
   uptimeMin = millis() / 60000;
+  // Se lo stack ha toccato il fondo ha già sporcato le variabili sotto: meglio
+  // ripartire puliti che continuare con dati corrotti.
+  if (stackFreeBytes() == 0) {
+    Serial.println("Stack esaurito: riavvio");
+    delay(100);
+    NVIC_SystemReset();
+  }
   if (millis() - memLogAt > 5UL * 60 * 1000) {
     memLogAt = millis();
     struct mallinfo mi = mallinfo();
@@ -970,7 +1049,7 @@ void updateDiagnostics() {
 // supera 1 KB e finisce sopra l'heap, cioè proprio sul documento JSON appena
 // allocato. Risultato: previsioni a zero o HardFault. Per questo setup() e
 // loop() girano su uno stack nostro, più grande; anche gli interrupt lo usano.
-const size_t APP_STACK_BYTES = 2048;  // picco misurato ~1,7 KB
+// APP_STACK_BYTES è in cima, con le altre impostazioni
 const uint32_t STACK_PAINT = 0xA5A5A5A5;
 alignas(8) uint32_t appStack[APP_STACK_BYTES / 4];
 
@@ -1019,6 +1098,7 @@ void appSetup() {
   refreshToken = SECRET_SPOTIFY_REFRESH_TOKEN;
   basicAuth = base64(String(SECRET_SPOTIFY_CLIENT_ID) + ":" + SECRET_SPOTIFY_CLIENT_SECRET);
   sp.configured = refreshToken.length() > 0;
+  buildWeatherPath();
 
   initProperties();  // in thingProperties.h
   reportResetCause();
