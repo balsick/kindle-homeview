@@ -30,7 +30,7 @@ PR_Y=497;  PR_H=40
 LT_Y=540;  ROW_H=72
 LG_Y=760;  LG_H=40
 
-if command -v usleep >/dev/null 2>&1; then
+if have usleep; then
   tick() { usleep 250000; }
   TICKS_PER_SEC=4
 else
@@ -102,8 +102,17 @@ text_c() {
 # Rettangolo pieno nero (per le linee): rect TOP LEFT WIDTH HEIGHT
 rect() { fb -b -B BLACK -k "top=$1,left=$2,width=$3,height=$4"; }
 
-# image FILE TOP: PNG centrato orizzontalmente
-image() { fb -b -g "file=$1,y=$2,halign=CENTER"; }
+# image FILE TOP: PNG centrato orizzontalmente. L'FBInk di KOReader non ha il
+# supporto per le immagini: se accanto al PNG c'è il .raw di make_qr.py (righe
+# larghe quanto lo schermo, un byte per pixel) lo copiamo nel framebuffer.
+image() {
+  local raw="${1%.png}.raw"
+  if [ -z "$PREVIEW_FBINK" ] && [ -f "$raw" ] && [ -w /dev/fb0 ]; then
+    dd if="$raw" of=/dev/fb0 bs=$SCREEN_W seek="$2" 2>/dev/null
+  else
+    fb -b -g "file=$1,y=$2,halign=CENTER"
+  fi
+}
 
 full_refresh() {
   rm -f "$RUN"/cache_*
@@ -405,10 +414,15 @@ poller() {
 # Legge gli eventi da un device. struct input_event su ARM a 32 bit, 16 byte:
 # sec(4) usec(4) type(2) code(2) value(4). Il file resta aperto sul descrittore 3,
 # quindi tra una lettura e l'altra non si perdono eventi.
+# Il Kindle 5 non ha od: hexdump con questo formato stampa le stesse 8 parole.
+u16dump() {
+  if have od; then od -An -tu2 -v; else hexdump -v -e '8/2 "%u " "\n"'; fi
+}
+
 key_reader() { # DEVICE
   exec 3< "$1" || return
   while true; do
-    set -- $(dd bs=16 count=1 <&3 2>/dev/null | od -An -tu2 -v)
+    set -- $(dd bs=16 count=1 <&3 2>/dev/null | u16dump)
     [ $# -ge 7 ] || { sleep 1; continue; }
     [ "$5" = 1 ] && echo "$6 $7"   # solo EV_KEY: codice, valore (1 premuto, 2 ripetizione, 0 rilascio)
   done
@@ -505,7 +519,7 @@ stop() {
 keytest() {
   local dev
   echo "Device di input:"
-  grep -E '^(N|H):' /proc/bus/input/devices
+  grep '^[NH]:' /proc/bus/input/devices
   echo
   echo "Premi i tasti (Ctrl+C per uscire). Formato: device codice valore"
   for dev in /dev/input/event*; do

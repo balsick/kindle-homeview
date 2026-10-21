@@ -7,6 +7,10 @@ QR_DIR=${QR_DIR:-$DIR/qr}   # generata da tools/make_qr.py
 [ -f "$QR_DIR/info.sh" ] && . "$QR_DIR/info.sh"
 
 RUN=${RUN:-/tmp/dashboard}
+
+# Il BusyBox del Kindle 5 (1.7.2) è vecchio: niente "command -v", niente od,
+# grep senza -E. have() usa which, che invece c'è.
+have() { which "$1" >/dev/null 2>&1; }
 VERSION=$(cat "$DIR/VERSION" 2>/dev/null)
 
 # http_get URL TIMEOUT_S FILE: wget con timeout fatto a mano, perché il wget

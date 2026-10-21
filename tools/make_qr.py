@@ -6,6 +6,7 @@
 Chiede rete e password del WiFi ospiti e crea in kindle/qr/:
   wifi.png  QR per connettersi al WiFi
   app.png   QR per aprire la webapp dell'Arduino (http://ARDUINO_HOST/)
+  *.raw     gli stessi QR già pronti per il framebuffer del Kindle
   info.sh   testi mostrati sotto i QR
 
 kindle/qr/ contiene la password in chiaro: è escluso dal repository e va
@@ -25,12 +26,27 @@ import segno.helpers
 ROOT = Path(__file__).resolve().parent.parent
 WIFI_PX = 300  # lato massimo dei QR in pixel sullo schermo 600x800
 APP_PX = 200
+SCREEN_W = 600
 
 
 def save_qr(qr, path, max_px):
     # Moduli interi e bordo standard di 4: QR nitido e leggibile sull'e-ink
     modules = qr.symbol_size(scale=1, border=4)[0]
-    qr.save(str(path), kind="png", scale=max(1, max_px // modules), border=4)
+    scale = max(1, max_px // modules)
+    qr.save(str(path), kind="png", scale=scale, border=4)
+    save_raw(qr, path.with_suffix(".raw"), scale)
+
+
+def save_raw(qr, path, scale):
+    """Il QR come fascia larga quanto lo schermo, un byte per pixel (255 nero,
+    0 bianco), centrata: dashboard.sh la copia con dd nel framebuffer del
+    Kindle, perché l'FBInk di KOReader non sa disegnare le immagini."""
+    rows = []
+    for row in qr.matrix_iter(scale=scale, border=4):
+        line = bytes(255 if dark else 0 for dark in row)
+        left = (SCREEN_W - len(line)) // 2
+        rows.append(bytes(left) + line + bytes(SCREEN_W - left - len(line)))
+    path.write_bytes(b"".join(rows))
 
 
 def shell_quote(s):
