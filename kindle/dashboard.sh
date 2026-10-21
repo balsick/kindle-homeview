@@ -40,17 +40,25 @@ fi
 
 # ---------- utilità ----------
 
-# Carica le impostazioni delle luci in ID_n, NAME_n, HINT_n, PLUS_n, MINUS_n
+# Carica le impostazioni delle luci in ID_n e NAME_n
 load_lights() {
-  local i=1 x pair old_ifs=$IFS
+  local i=1 x old_ifs=$IFS
   for x in $LIGHT_IDS; do eval "ID_$i=\$x"; i=$((i + 1)); done
   NLIGHTS=$((i - 1))
-  i=1; for pair in $LIGHT_KEYS; do eval "PLUS_$i=\${pair%:*} MINUS_$i=\${pair#*:}"; i=$((i + 1)); done
   IFS='|'
   i=1; for x in $LIGHT_NAMES; do eval "NAME_$i=\$x"; i=$((i + 1)); done
-  i=1; for x in $LIGHT_HINTS; do eval "HINT_$i=\$x"; i=$((i + 1)); done
   IFS=$old_ifs
 }
+
+# Luce scelta col joystick (1..NLIGHTS)
+selected() {
+  local sel=1
+  [ -f "$RUN/sel" ] && read -r sel < "$RUN/sel"
+  echo "$sel"
+}
+
+# Valore di una chiave dell'ultimo /status, per chi non ha fatto load_status
+status_value() { sed -n "s/^$1=//p" "$RUN/status" 2>/dev/null; }
 
 qr_mode() {
   local mode=""
@@ -123,9 +131,12 @@ full_refresh() {
 
 # Fascia in basso con la legenda dei tasti sotto lo schermo
 draw_legend() {
+  local legend=$LEGEND_IDLE
+  [ "$(status_value sp_active)" = 1 ] && legend=$LEGEND_MUSIC
+  changed legend "$legend" || return 0
   zone_clear $LG_Y $LG_H
   rect $LG_Y $MARGIN $((SCREEN_W - 2 * MARGIN)) 2
-  text_c $((LG_Y + 10)) 18 "$FONT" "$LEGEND"
+  text_c $((LG_Y + 10)) 18 "$FONT" "$legend"
   zone_refresh $LG_Y $LG_H
 }
 
@@ -159,17 +170,22 @@ hide_qr() {
 
 # ---------- luci ----------
 
+# La luce scelta ha una barretta nera a sinistra e, sotto il nome, i tasti
 draw_light_row() { # INDICE
-  local i=$1 on b name hint pct segs y
+  local i=$1 on b name pct segs y sel=0
   read -r on < "$RUN/l${i}_on"
   read -r b < "$RUN/l${i}_b"
-  changed "light_$i" "$on|$b" || return 0
-  eval "name=\$NAME_$i hint=\$HINT_$i"
+  [ "$(selected)" = "$i" ] && sel=1
+  changed "light_$i" "$on|$b|$sel" || return 0
+  eval "name=\$NAME_$i"
   if [ "$on" = 1 ]; then pct="$b%"; segs=$(((b + 5) / 10)); else pct="spenta"; segs=0; fi
   y=$((LT_Y + (i - 1) * ROW_H))
   zone_clear $y $ROW_H
   text $((y + 6)) 30 "$FONT_BOLD" $MARGIN 370 "$name"
-  text $((y + 44)) 18 "$FONT" $MARGIN 370 "$hint"
+  if [ $sel = 1 ]; then
+    rect $((y + 8)) 8 8 $((ROW_H - 16))
+    text $((y + 44)) 18 "$FONT" $MARGIN 370 "◀ ▶ regola  ·  ● on/off"
+  fi
   text $((y + 22)) 22 "$FONT" 250 130 "$(bar $segs 10)"
   text $((y + 16)) 30 "$FONT" 480 10 "$pct"
   zone_refresh $y $ROW_H
@@ -205,7 +221,25 @@ adjust_light() { # INDICE DELTA
   set_light "$1" $on $b
 }
 
-# Indietro: se c'è almeno una luce accesa le spegne tutte, altrimenti le
+select_light() { # DELTA (+1 giù, -1 su), senza fare il giro
+  local old new
+  old=$(selected); new=$((old + $1))
+  [ $new -lt 1 ] && new=1
+  [ $new -gt "$NLIGHTS" ] && new=$NLIGHTS
+  [ $new = "$old" ] && return
+  echo $new > "$RUN/sel"
+  draw_light_row "$old"
+  draw_light_row "$new"
+}
+
+toggle_light() { # INDICE
+  local on b
+  read -r on < "$RUN/l$1_on"
+  read -r b < "$RUN/l$1_b"
+  set_light "$1" $((1 - on)) "$b"
+}
+
+# Tastiera: se c'è almeno una luce accesa le spegne tutte, altrimenti le
 # riaccende tutte all'ultima luminosità.
 toggle_all() {
   local i=1 on any=0 b
@@ -234,13 +268,15 @@ send_light() { # INDICE
 }
 
 # Rilegge lo stato dallo Shelly (se le luci sono state cambiate dall'app o
-# da un interruttore), senza sovrascrivere modifiche fatte nel frattempo.
+# da un interruttore), senza sovrascrivere modifiche fatte nel frattempo né
+# quelle non ancora inviate (sent_N è del sender, che chiama questa funzione).
 sync_lights() {
-  local i=1 id on b ver ver2 f="$RUN/sync.json"
+  local i=1 id on b ver ver2 sent f="$RUN/sync.json"
   while [ $i -le "$NLIGHTS" ]; do
     eval "id=\$ID_$i"
     read -r ver < "$RUN/l${i}_ver"
-    if http_get "http://$SHELLY_HOST/rpc/Light.GetStatus?id=$id" 3 "$f"; then
+    eval "sent=\${sent_$i:-\$ver}"
+    if [ "$ver" = "$sent" ] && http_get "http://$SHELLY_HOST/rpc/Light.GetStatus?id=$id" 3 "$f"; then
       on=$(sed -n 's/.*"output":\([a-z]*\).*/\1/p' "$f")
       b=$(sed -n 's/.*"brightness":\([0-9]*\).*/\1/p' "$f")
       read -r ver2 < "$RUN/l${i}_ver"
@@ -256,8 +292,32 @@ sync_lights() {
   draw_lights
 }
 
+# Volume: i tasti cambiano vol_target e vol_ver; il sender manda all'Arduino
+# solo il valore finale, quando i tasti si fermano (come per le luci).
+volume_change() { # DELTA
+  local cur v now until=0
+  now=$(date +%s)
+  [ -f "$RUN/vol_until" ] && read -r until < "$RUN/vol_until"
+  if [ "$now" -lt "$until" ]; then read -r cur < "$RUN/vol_target"; else cur=$(status_value sp_volume); fi
+  [ "${cur:--1}" -ge 0 ] 2>/dev/null || return   # il dispositivo non regola il volume
+  cur=$((cur + $1))
+  [ $cur -lt 0 ] && cur=0
+  [ $cur -gt 100 ] && cur=100
+  echo $cur > "$RUN/vol_target"
+  echo $((now + 5)) > "$RUN/vol_until"   # per 5 s lo schermo mostra il valore scelto
+  read -r v < "$RUN/vol_ver"; echo $((v + 1)) > "$RUN/vol_ver"
+  load_status; draw_spotify
+}
+
+send_volume() {
+  local v
+  read -r v < "$RUN/vol_target"
+  http_get "http://$ARDUINO_HOST/cmd?a=vol&v=$v" 10 "$RUN/vol.out" && touch "$RUN/poll_now"
+}
+
 sender() {
   local i ver sent prev pending sync_left=$((SHELLY_SYNC_SECONDS * TICKS_PER_SEC))
+  local vol_sent=0 vol_prev=0
   i=1; while [ $i -le "$NLIGHTS" ]; do eval "sent_$i=0 prev_$i=0"; i=$((i + 1)); done
   while true; do
     pending=0
@@ -273,6 +333,12 @@ sender() {
       eval "prev_$i=\$ver"
       i=$((i + 1))
     done
+    read -r ver < "$RUN/vol_ver"
+    if [ "$ver" != "$vol_sent" ] && [ "$ver" = "$vol_prev" ]; then
+      send_volume
+      vol_sent=$ver
+    fi
+    vol_prev=$ver
     sync_left=$((sync_left - 1))
     if [ $sync_left -le 0 ] && [ $pending = 0 ]; then
       sync_lights
@@ -350,10 +416,15 @@ draw_weather() {
 
 draw_spotify() {
   local state
+  local vol=${S_sp_volume:--1} now until=0
+  now=$(date +%s)
+  [ -f "$RUN/vol_until" ] && read -r until < "$RUN/vol_until"
+  [ "$now" -lt "$until" ] && read -r vol < "$RUN/vol_target"   # valore appena scelto coi tasti
   if [ "$S_sp_ok" != 1 ]; then state="Spotify non raggiungibile"
-  elif [ "$S_sp_active" != 1 ]; then state="Spotify: niente in riproduzione"
-  elif [ "$S_sp_playing" = 1 ]; then state="▶  In riproduzione"
-  else state="‖  In pausa"; fi
+  elif [ "$S_sp_active" != 1 ]; then state="Spotify: a casa non suona niente"
+  elif [ "$S_sp_playing" = 1 ]; then state="▶  $S_sp_device"
+  else state="‖  $S_sp_device, in pausa"; fi
+  [ "$S_sp_active" = 1 ] && [ "$vol" -ge 0 ] 2>/dev/null && state="$state  ·  volume $vol%"
   [ "$S_sp_active" = 1 ] || S_sp_track="" S_sp_artist=""
 
   if changed spotify "$state|$S_sp_track|$S_sp_artist"; then
@@ -376,6 +447,7 @@ draw_spotify() {
     [ -n "$line" ] && text $((PR_Y + 6)) 22 "$FONT" $MARGIN $MARGIN "$line"
     zone_refresh $PR_Y $PR_H
   fi
+  draw_legend   # la legenda dipende dalla musica
 }
 
 poller() {
@@ -450,23 +522,29 @@ spotify_cmd() {
   ( http_get "http://$ARDUINO_HOST/cmd?a=$1" 10 "$RUN/cmd.out"; touch "$RUN/poll_now" ) &
 }
 
-handle_key() { # CODICE VALORE
-  local i=1 plus minus
+# La musica suona a casa? (per i tasti ai lati)
+music_at_home() { [ "$(status_value sp_active)" = 1 ]; }
+
+handle_key() { # CODICE VALORE (1 premuto, 2 tenuto premuto)
   [ "$2" = 0 ] && return
   if qr_mode; then           # con i QR a schermo un tasto qualsiasi torna indietro
     [ "$2" = 1 ] && hide_qr
     return
   fi
-  while [ $i -le "$NLIGHTS" ]; do
-    eval "plus=\$PLUS_$i minus=\$MINUS_$i"
-    [ "$1" = "$plus" ] && { adjust_light $i "$STEP"; return; }
-    [ "$1" = "$minus" ] && { adjust_light $i "-$STEP"; return; }
-    i=$((i + 1))
-  done
-  [ "$2" = 1 ] || return   # tenendo premuto, si ripetono solo i tasti delle luci
+  # Tenendo premuto si ripetono luminosità e volume
   case "$1" in
-    "$KEY_PREV") spotify_cmd prev ;;
-    "$KEY_NEXT") spotify_cmd next ;;
+    "$KEY_LEFT") adjust_light "$(selected)" "-$STEP"; return ;;
+    "$KEY_RIGHT") adjust_light "$(selected)" "$STEP"; return ;;
+    "$KEY_VOL_UP") music_at_home && volume_change "$VOLUME_STEP"; return ;;
+    "$KEY_VOL_DOWN") music_at_home && volume_change "-$VOLUME_STEP"; return ;;
+  esac
+  [ "$2" = 1 ] || return
+  case "$1" in
+    "$KEY_UP") select_light -1 ;;
+    "$KEY_DOWN") select_light 1 ;;
+    "$KEY_CENTER") toggle_light "$(selected)" ;;
+    "$KEY_TRACK_NEXT") music_at_home && spotify_cmd next ;;
+    "$KEY_TRACK_PREV") music_at_home && spotify_cmd prev ;;
     "$KEY_PLAY") spotify_cmd toggle ;;
     "$KEY_ALL") toggle_all ;;
     "$KEY_REFRESH") full_refresh; touch "$RUN/poll_now" ;;
@@ -486,6 +564,7 @@ run() {
     echo 0 > "$RUN/l${i}_on"; echo 50 > "$RUN/l${i}_b"; echo 0 > "$RUN/l${i}_ver"
     i=$((i + 1))
   done
+  echo 1 > "$RUN/sel"; echo 0 > "$RUN/vol_ver"
 
   /etc/init.d/framework stop >/dev/null 2>&1
   lipc-set-prop com.lab126.powerd preventScreenSaver 1

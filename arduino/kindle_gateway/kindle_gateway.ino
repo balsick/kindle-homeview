@@ -129,6 +129,8 @@ struct {
   bool active = false;    // c'è qualcosa caricato nel player
   bool playing = false;
   String track, artist;
+  String device;          // dove suona (solo dispositivi di casa)
+  int volume = -1;        // -1: il dispositivo non regola il volume
   long progressMs = 0, durationMs = 0;
   unsigned long fetchedAt = 0;
 } sp;
@@ -198,6 +200,7 @@ Response httpsRequest(const char* host, const char* method, const String& path,
 
 const size_t WEATHER_MAX_BYTES = 4096;
 const size_t TOKEN_MAX_BYTES = 2048;
+const size_t DEVICES_MAX_BYTES = 3072;
 
 class BodyStream;
 String readBody(Client& c, const Response& r, size_t maxBytes);
@@ -316,23 +319,28 @@ bool refreshSpotifyToken() {
 }
 
 // Chiama la Web API. Dopo la chiamata il corpo è da leggere da `tls`.
-Response spotifyApi(const char* method, const String& path) {
+Response spotifyApi(const char* method, const String& path, const String& body = "") {
   if (accessToken.length() == 0 || millis() - tokenAt > tokenValidMs) {
     if (!refreshSpotifyToken()) return Response();
   }
-  Response r = httpsRequest("api.spotify.com", method, path,
-                            "Authorization: Bearer " + accessToken + "\r\n", "");
+  String headers = "Authorization: Bearer " + accessToken + "\r\n";
+  if (body.length()) headers += "Content-Type: application/json\r\n";
+  Response r = httpsRequest("api.spotify.com", method, path, headers, body);
   if (r.code == 401) accessToken = "";  // token scaduto: si rinnova alla prossima chiamata
   return r;
 }
 
 void updateNowPlaying() {
-  Response r = spotifyApi("GET", "/v1/me/player/currently-playing?market=from_token&additional_types=episode");
+  // /v1/me/player dice anche su quale dispositivo suona: contano solo quelli
+  // di casa (gli Echo, tipo "Speaker"), non il telefono in ufficio.
+  Response r = spotifyApi("GET", "/v1/me/player?market=from_token&additional_types=episode");
   unsigned long next = SPOTIFY_POLL_IDLE_MS;
 
   if (r.code == 204) {  // niente in riproduzione
     sp.ok = true;
     sp.active = sp.playing = false;
+    sp.device = "";
+    sp.volume = -1;
   } else if (r.code == 200) {
     JsonDocument filter;
     filter["is_playing"] = true;
@@ -341,6 +349,10 @@ void updateNowPlaying() {
     filter["item"]["duration_ms"] = true;
     filter["item"]["artists"][0]["name"] = true;
     filter["item"]["show"]["name"] = true;
+    filter["device"]["name"] = true;
+    filter["device"]["type"] = true;
+    filter["device"]["volume_percent"] = true;
+    filter["device"]["supports_volume"] = true;
 
     BodyStream body(tls, r);
     JsonDocument doc;
@@ -348,8 +360,12 @@ void updateNowPlaying() {
     sp.ok = !err;
     if (!err) {
       JsonObject item = doc["item"];
-      sp.active = !item.isNull();
-      sp.playing = doc["is_playing"] | false;
+      JsonObject dev = doc["device"];
+      bool home = strcmp(dev["type"] | "", SPOTIFY_HOME_TYPE) == 0;
+      sp.device = home ? String(dev["name"] | "") : String();
+      sp.volume = home && (dev["supports_volume"] | false) ? (dev["volume_percent"] | -1) : -1;
+      sp.active = home && !item.isNull();
+      sp.playing = sp.active && (doc["is_playing"] | false);
       sp.progressMs = doc["progress_ms"] | 0;
       sp.durationMs = item["duration_ms"] | 0;
       sp.track = item["name"] | "";
@@ -372,16 +388,69 @@ void updateNowPlaying() {
   nextSpotifyAt = millis() + next;
 }
 
-int spotifyCommand(String action) {
+// Id del dispositivo di casa su cui far partire la musica (SPOTIFY_HOME_DEVICE)
+String spotifyHomeDeviceId() {
+  Response r = spotifyApi("GET", "/v1/me/player/devices");
+  String json = r.code == 200 ? readBody(tls, r, DEVICES_MAX_BYTES) : String();
+  tls.stop();
+  JsonDocument doc;
+  if (deserializeJson(doc, json)) return "";
+  for (JsonObject d : doc["devices"].as<JsonArray>())
+    if (strcmp(d["name"] | "", SPOTIFY_HOME_DEVICE) == 0) return d["id"] | "";
+  return "";
+}
+
+// Fa partire la musica a casa: riprende da dove era rimasta sul dispositivo di
+// casa (spostandola lì se suona altrove). Se non c'è niente da riprendere e
+// c'è una playlist di riserva, parte quella.
+int spotifyStartAtHome() {
+  String id = spotifyHomeDeviceId();
+  if (id.length() == 0) {
+    logError(String("Spotify: ") + SPOTIFY_HOME_DEVICE + " non trovato tra i dispositivi");
+    return 404;
+  }
+  Response r = spotifyApi("PUT", "/v1/me/player/play?device_id=" + id);
+  tls.stop();
+  if ((r.code < 200 || r.code >= 300) && strlen(SPOTIFY_FALLBACK_CONTEXT) > 0) {
+    r = spotifyApi("PUT", "/v1/me/player/play?device_id=" + id,
+                   String("{\"context_uri\":\"") + SPOTIFY_FALLBACK_CONTEXT + "\"}");
+    tls.stop();
+  }
+  if (r.code < 200 || r.code >= 300) logError("Spotify: avvio a casa fallito, HTTP " + String(r.code));
+  return r.code;
+}
+
+// Azioni: toggle (pausa, o avvio a casa se a casa non suona niente), play,
+// pause, next, prev, vol (con value = 0-100). Tutto tranne l'avvio vale solo
+// per la musica che suona a casa.
+int spotifyCommand(String action, const String& value) {
   if (!sp.configured) return 503;
   if (action == "toggle") action = sp.playing ? "pause" : "play";
 
   Response r;
-  if (action == "play") r = spotifyApi("PUT", "/v1/me/player/play");
-  else if (action == "pause") r = spotifyApi("PUT", "/v1/me/player/pause");
-  else if (action == "next") r = spotifyApi("POST", "/v1/me/player/next");
-  else if (action == "prev") r = spotifyApi("POST", "/v1/me/player/previous");
-  else return 400;
+  if (action == "play") {
+    if (!sp.active) {
+      int code = spotifyStartAtHome();
+      nextSpotifyAt = millis() + 1500;
+      return code;
+    }
+    r = spotifyApi("PUT", "/v1/me/player/play");
+  } else if (!sp.active) {
+    return 409;  // a casa non suona niente
+  } else if (action == "pause") {
+    r = spotifyApi("PUT", "/v1/me/player/pause");
+  } else if (action == "next") {
+    r = spotifyApi("POST", "/v1/me/player/next");
+  } else if (action == "prev") {
+    r = spotifyApi("POST", "/v1/me/player/previous");
+  } else if (action == "vol") {
+    if (sp.volume < 0) return 409;  // questo dispositivo non regola il volume
+    int v = constrain(value.toInt(), 0, 100);
+    r = spotifyApi("PUT", "/v1/me/player/volume?volume_percent=" + String(v));
+    if (r.code >= 200 && r.code < 300) sp.volume = v;
+  } else {
+    return 400;
+  }
   tls.stop();
 
   if (r.code >= 200 && r.code < 300) {
@@ -596,6 +665,8 @@ String buildStatus() {
   kv(s, "sp_artist", sp.artist);
   kv(s, "sp_progress", String(spotifyProgressMs() / 1000));
   kv(s, "sp_duration", String(sp.durationMs / 1000));
+  kv(s, "sp_device", sp.device);
+  kv(s, "sp_volume", String(sp.volume));
   kv(s, "ota_req", String(otaRequests));
   return s;
 }
@@ -639,6 +710,8 @@ String buildApiState() {
   s["artist"] = sp.artist;
   s["progress"] = spotifyProgressMs() / 1000;
   s["duration"] = sp.durationMs / 1000;
+  s["device"] = sp.device;
+  s["volume"] = sp.volume;
 
   JsonObject ota = doc["ota"].to<JsonObject>();
   ota["configured"] = strlen(SECRET_GITHUB_TOKEN) > 0;
@@ -799,7 +872,7 @@ void handleClient() {
     otaRequests++;
     sendText(c, 200, "ok\n");
   } else if (path.startsWith("/cmd?") || path.startsWith("/api/cmd?")) {
-    sendCommandResult(c, spotifyCommand(queryParam(path, "a")));
+    sendCommandResult(c, spotifyCommand(queryParam(path, "a"), queryParam(path, "v")));
   } else if (path == "/" || path.startsWith("/?")) {
     sendWebapp(c);
   } else if (path == "/api/state") {

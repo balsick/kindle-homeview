@@ -8,25 +8,35 @@ SHELLY_HOST="192.168.1.50"    # IP dello Shelly Plus RGBW PM (profilo "light", 4
 # Le luci, nello stesso ordine in tutte le righe sotto.
 LIGHT_IDS="0 1 2"                                 # canale Shelly (0-3)
 LIGHT_NAMES="Soggiorno|Cucina|Studio"
-LIGHT_HINTS="◀ tasti sinistri|tasti destri ▶|joystick ▲▼"
 STEP=10                                           # passo di luminosità in %
+VOLUME_STEP=10                                    # passo del volume di Spotify in %
 
-# Tasti. I codici vengono dalla keymap del Kindle 4 di KOReader (stesso
-# hardware del Kindle 5): VERIFICALI con "dashboard.sh keytest".
+# Tasti: codici misurati su un Kindle 5 (firmware 4.1.4) con
+# "dashboard.sh keytest". Se il tuo Kindle dà codici diversi, ridefiniscili
+# in config.sh.
 INPUT_DEVICES="/dev/input/event0 /dev/input/event1"
 
-# Per ogni luce "tasto_più:tasto_meno", nello stesso ordine di LIGHT_IDS.
-LIGHT_KEYS="109:104 193:191 103:108"
+# Joystick: le luci. ▲▼ sceglie la luce, ◀▶ la luminosità, centro on/off
+KEY_UP=103
+KEY_DOWN=108
+KEY_LEFT=105
+KEY_RIGHT=106
+KEY_CENTER=194
 
-KEY_PREV=105      # joystick sinistra: brano precedente
-KEY_NEXT=106      # joystick destra:   brano successivo
-KEY_PLAY=194      # joystick centro:   play/pausa
-KEY_ALL=158       # Indietro: spegne tutte le luci / le riaccende
+# Tasti pagina ai lati: la musica che suona a casa
+KEY_VOL_UP=104      # sinistra, avanti
+KEY_VOL_DOWN=193    # sinistra, indietro
+KEY_TRACK_NEXT=191  # destra, avanti
+KEY_TRACK_PREV=109  # destra, indietro
+
+KEY_PLAY=158      # Indietro: pausa, o fa partire la musica a casa
+KEY_ALL=29        # Tastiera: spegne tutte le luci / le riaccende
 KEY_REFRESH=139   # Menu: refresh completo dello schermo
 KEY_QR=102        # Home: QR del WiFi ospiti e della webapp
 
-# Legenda nella fascia in basso (i tasti sotto lo schermo)
-LEGEND="◀ ▶ brano  ·  ● play  ·  ↩ tutte le luci  ·  ⌂ WiFi ospiti"
+# Legenda nella fascia in basso: cambia se la musica suona a casa o no
+LEGEND_MUSIC="lati: volume · brani  ·  ↩ pausa  ·  ⌨ luci  ·  ⌂ QR"
+LEGEND_IDLE="↩ musica a casa  ·  ⌨ tutte le luci  ·  ⌂ WiFi ospiti"
 QR_SECONDS=120    # dopo quanto la schermata dei QR si chiude da sola
 BATTERY_LOW=20    # sotto questa percentuale la batteria è in grassetto
 

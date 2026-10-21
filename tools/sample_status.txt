@@ -16,3 +16,5 @@ sp_track=Bohemian Rhapsody - Remastered 2011
 sp_artist=Queen
 sp_progress=134
 sp_duration=354
+sp_device=Ovunque
+sp_volume=30

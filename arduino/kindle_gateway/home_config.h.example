@@ -8,3 +8,12 @@ const float LONGITUDE = 9.1900;
 // Luci per la webapp: stessi canali e nomi di config.sh sul Kindle
 const char* const SHELLY_HOST = "192.168.1.50";  // IP dello Shelly (riservalo nel router)
 const Light LIGHTS[] = {{"Soggiorno", 0}, {"Cucina", 1}, {"Studio", 2}};
+
+// Spotify: la musica conta solo se suona su un dispositivo di questo tipo
+// (gli Echo sono "Speaker"; il telefono è "Smartphone", il Mac "Computer").
+const char* const SPOTIFY_HOME_TYPE = "Speaker";
+// Dove far partire la musica col tasto Indietro, se a casa non suona niente
+const char* const SPOTIFY_HOME_DEVICE = "Soggiorno";
+// Playlist di riserva se non c'è niente da riprendere ("" = nessuna),
+// es. "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"
+const char* const SPOTIFY_FALLBACK_CONTEXT = "";

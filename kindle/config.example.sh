@@ -11,8 +11,8 @@ SHELLY_HOST="192.168.1.50"    # IP dello Shelly Plus RGBW PM
 
 # Codici dei tasti, se keytest mostra valori diversi da quelli di defaults.sh
 # INPUT_DEVICES="/dev/input/event0 /dev/input/event1"
-# LIGHT_KEYS="109:104 193:191 103:108"
-# KEY_PLAY=194
+# KEY_VOL_UP=104
+# KEY_PLAY=158
 
 # Per disattivare gli aggiornamenti automatici
 # OTA_ENABLED=0

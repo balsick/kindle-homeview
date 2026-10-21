@@ -31,25 +31,36 @@ Spotify, Open-Meteo ◄─HTTPS── UNO R4 WiFi ──► Arduino Cloud (notif
 
 ## Tasti
 
+Il joystick comanda le luci, i tasti pagina ai lati la musica che suona a casa.
+
 | Tasto | Azione |
 |---|---|
-| Pagina sinistri (avanti / indietro) | Luce 1 + / − |
-| Pagina destri (avanti / indietro) | Luce 2 + / − |
-| Joystick su / giù | Luce 3 + / − |
-| Joystick sinistra / destra | Brano precedente / successivo |
-| Joystick centro | Play / pausa |
-| Indietro | Spegne tutte le luci (o le riaccende) |
+| Joystick su / giù | Sceglie la luce (barretta nera a sinistra della riga) |
+| Joystick sinistra / destra | Luminosità della luce scelta − / + |
+| Joystick centro | Accende / spegne la luce scelta |
+| Pagina sinistri (avanti / indietro) | Volume + / − |
+| Pagina destri (avanti / indietro) | Brano successivo / precedente |
+| Indietro | Pausa; se a casa non suona niente, fa partire la musica |
+| Tastiera | Spegne tutte le luci (o le riaccende) |
 | Menu | Refresh completo dello schermo |
 | Home | Mostra i QR (WiFi ospiti e webapp) |
 
-Con i QR a schermo un tasto qualsiasi torna al pannello senza fare altro. La
-schermata si chiude comunque da sola dopo 2 minuti (`QR_SECONDS`). Una fascia
-in basso riassume i tasti sotto lo schermo; il testo è `LEGEND` (in `defaults.sh`,
-ridefinibile in `config.sh`).
+**Musica "a casa".** Conta solo quella che suona su un dispositivo Spotify di
+tipo `Speaker` (gli Echo; `SPOTIFY_HOME_TYPE` in `home_config.h`): se ascolti
+dal telefono fuori casa il pannello la ignora e i tasti non la toccano. Col
+tasto Indietro la musica riparte sul dispositivo `SPOTIFY_HOME_DEVICE` (anche
+un gruppo, es. "Ovunque") da dove era rimasta, spostandola lì se suona altrove;
+se non c'è niente da riprendere parte `SPOTIFY_FALLBACK_CONTEXT`, se impostata.
 
-Tenendo premuto un tasto luce la luminosità continua a cambiare. Allo Shelly viene
-inviato solo l'ultimo valore, quando i tasti si fermano (debounce). Con "−" dal
-minimo la luce si spegne, con "+" da spenta si riaccende al minimo.
+Con i QR a schermo un tasto qualsiasi torna al pannello senza fare altro. La
+schermata si chiude comunque da sola dopo 2 minuti (`QR_SECONDS`). La fascia
+in basso riassume i tasti e cambia se la musica suona o no (`LEGEND_MUSIC`,
+`LEGEND_IDLE` in `defaults.sh`, ridefinibili in `config.sh`).
+
+Tenendo premuto luminosità o volume il valore continua a cambiare. Allo Shelly
+e a Spotify viene inviato solo l'ultimo valore, quando i tasti si fermano
+(debounce). Con "−" dal minimo la luce si spegne, con "+" da spenta si
+riaccende al minimo.
 
 ## 1. Rete
 
@@ -265,8 +276,9 @@ Per disattivare l'OTA metti `OTA_ENABLED=0` in `config.sh`.
 Provato su un Kindle 5 (firmware 4.1.4) col FBInk di KOReader. Cose da sapere:
 - il BusyBox del Kindle è il 1.7.2: niente `od`, niente `command -v`, `grep`
   senza `-E`. Gli script usano `hexdump`, `which` e `grep` semplice;
-- i codici dei tasti pagina erano diversi da quelli della keymap di KOReader:
-  `keytest` li mostra, poi vanno in `config.sh` (`LIGHT_KEYS`);
+- i codici dei tasti in `defaults.sh` sono quelli misurati su questo Kindle
+  (diversi dalla keymap di KOReader per i tasti pagina): se il tuo dà altro,
+  `keytest` li mostra e li ridefinisci in `config.sh`;
 - USBNetwork: con SSH via WiFi (`K3_WIFI="true"`) il dropbear del pacchetto
   accetta solo chiavi RSA, non ed25519;
 - da macOS, i file `._*` che il Finder lascia sul disco del Kindle fanno
