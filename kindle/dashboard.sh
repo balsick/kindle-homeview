@@ -72,7 +72,7 @@ changed() {
 bar() { # PIENI TOTALE
   local i=0 s=""
   while [ $i -lt "$2" ]; do
-    if [ $i -lt "$1" ]; then s="$s■"; else s="$s□"; fi
+    if [ $i -lt "$1" ]; then s="${s}■"; else s="${s}□"; fi
     i=$((i + 1))
   done
   printf '%s' "$s"
@@ -310,8 +310,8 @@ draw_weather() {
   changed weather "$S_w_ok|$S_w_temp|$S_w_desc|$S_w_feels|$S_w_hum|$S_w_wind|$S_d0|$S_d1|$S_d2" || return 0
   zone_clear $WX_Y $WX_H
   if [ "$S_w_ok" = 1 ]; then
-    text $((WX_Y + 10)) 50 "$FONT_BOLD" $MARGIN $MARGIN "$S_w_temp°  $S_w_desc"
-    text $((WX_Y + 76)) 22 "$FONT" $MARGIN $MARGIN "Percepita $S_w_feels° · Umidità $S_w_hum% · Vento $S_w_wind km/h"
+    text $((WX_Y + 10)) 50 "$FONT_BOLD" $MARGIN $MARGIN "${S_w_temp}°  $S_w_desc"
+    text $((WX_Y + 76)) 22 "$FONT" $MARGIN $MARGIN "Percepita ${S_w_feels}° · Umidità $S_w_hum% · Vento $S_w_wind km/h"
     forecast_row $((WX_Y + 116)) "$S_d0"
     forecast_row $((WX_Y + 147)) "$S_d1"
     forecast_row $((WX_Y + 178)) "$S_d2"

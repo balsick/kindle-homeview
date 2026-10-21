@@ -72,7 +72,7 @@ def main():
         tokens = json.load(response)
 
     print("\nCopia questa riga in arduino_secrets.h:\n")
-    print(f'#define SPOTIFY_REFRESH_TOKEN "{tokens["refresh_token"]}"')
+    print(f'#define SECRET_SPOTIFY_REFRESH_TOKEN "{tokens["refresh_token"]}"')
 
 
 if __name__ == "__main__":
