@@ -41,16 +41,13 @@
 #include "webapp.h"
 
 // ---- Configurazione ----
-const float LATITUDE = 45.4642;  // cambia con la tua posizione
-const float LONGITUDE = 9.1900;
-
-// Luci per la webapp: stessi canali e nomi di kindle/config.sh
-const char* const SHELLY_HOST = "192.168.1.50";
+// Posizione, Shelly e luci di casa stanno in home_config.h (copia di
+// home_config.h.example), escluso da git come arduino_secrets.h.
 struct Light {
   const char* name;
   int id;  // canale Shelly (0-3)
 };
-const Light LIGHTS[] = {{"Soggiorno", 0}, {"Cucina", 1}, {"Studio", 2}};
+#include "home_config.h"
 const int NUM_LIGHTS = sizeof(LIGHTS) / sizeof(LIGHTS[0]);
 
 // Repository da cui il Kindle prende gli aggiornamenti: i tag kindle-vN

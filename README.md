@@ -78,9 +78,10 @@ Per play, pausa e cambio brano serve Spotify Premium e un dispositivo attivo
    non va inserito: lo configura Arduino Cloud. Un `arduino_secrets.h` creato
    prima dell'OTA, senza `SECRET_GITHUB_TOKEN`, va ancora bene: l'OTA resta
    solo disattivato.
-3. In `kindle_gateway.ino` imposta `LATITUDE` e `LONGITUDE`, poi `SHELLY_HOST`
-   e `LIGHTS` (nomi e canali delle luci per la webapp, uguali a quelli del
-   Kindle).
+3. Copia `home_config.h.example` in `home_config.h` e imposta `LATITUDE` e
+   `LONGITUDE`, poi `SHELLY_HOST` e `LIGHTS` (nomi e canali delle luci per la
+   webapp, uguali a quelli del Kindle). Come `arduino_secrets.h`, è escluso da
+   git. Nel Cloud Editor aggiungilo come nuova scheda dello sketch.
 4. Librerie: **ArduinoIoTCloud** (con le dipendenze) e **ArduinoJson** 7.
 5. Carica lo sketch dal Cloud Editor, oppure dall'IDE se la scheda è già
    associata al Thing. `thingProperties.h` è quello generato dal tuo Thing.

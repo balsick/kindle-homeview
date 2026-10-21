@@ -1,4 +1,5 @@
 arduino/kindle_gateway/arduino_secrets.h
+arduino/kindle_gateway/home_config.h
 /preview.png
 /preview-qr.png
 kindle/qr/

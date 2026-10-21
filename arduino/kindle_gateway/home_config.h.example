@@ -1,0 +1,10 @@
+// Copia questo file in "home_config.h" e metti i dati di casa tua.
+// home_config.h è escluso da git, come arduino_secrets.h.
+
+// Posizione per il meteo (Open-Meteo)
+const float LATITUDE = 45.4642;
+const float LONGITUDE = 9.1900;
+
+// Luci per la webapp: stessi canali e nomi di config.sh sul Kindle
+const char* const SHELLY_HOST = "192.168.1.50";  // IP dello Shelly (riservalo nel router)
+const Light LIGHTS[] = {{"Soggiorno", 0}, {"Cucina", 1}, {"Studio", 2}};
