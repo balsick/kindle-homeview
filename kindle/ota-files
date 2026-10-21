@@ -1,0 +1,9 @@
+# File del pannello aggiornati via OTA (cartella kindle/ del repository).
+# Ogni file deve finire con la riga "# ota:end": serve a riconoscere i
+# download incompleti.
+lib.sh
+defaults.sh
+dashboard.sh
+ota.sh
+ota-files
+# ota:end

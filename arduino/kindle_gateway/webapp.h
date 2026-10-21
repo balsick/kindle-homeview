@@ -41,6 +41,8 @@ input[type=range]{width:100%;margin:12px 0 0;accent-color:var(--accent);height:2
 .controls button{width:56px;height:56px;border-radius:50%;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:20px;cursor:pointer}
 .controls button.main{width:64px;height:64px;background:var(--accent);border-color:var(--accent);color:#fff}
 button:disabled,.switch:disabled{opacity:.4}
+.btn{border:1px solid var(--line);background:var(--bg);color:var(--text);border-radius:10px;padding:10px 14px;font:inherit;font-weight:600;cursor:pointer;flex:none}
+.note{margin-top:10px}
 #err{background:#b3261e;color:#fff;border-radius:12px;padding:10px 14px;margin-bottom:12px}
 </style>
 </head>
@@ -67,12 +69,22 @@ button:disabled,.switch:disabled{opacity:.4}
 <button data-a="next" aria-label="Brano successivo">&#9197;</button>
 </div>
 </div>
+
+<h2>Kindle</h2>
+<div class="card">
+<div class="row">
+<div><div id="kver">Versione: —</div><div class="muted" id="klatest"></div></div>
+<button class="btn" id="ota">Aggiorna</button>
+</div>
+<div class="muted note" id="otamsg" hidden></div>
+</div>
 </main>
 <script>
 const $ = id => document.getElementById(id);
 const touched = {};  // luce -> ultima modifica locale, per non farsi sovrascrivere dal polling
 let rows = [];
 
+const short = sha => sha ? sha.slice(0, 7) : "";
 const mmss = s => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 
 async function get(path) {
@@ -136,6 +148,12 @@ function render(s) {
   $("dur").textContent = sp.active ? mmss(sp.duration) : "";
   $("play").innerHTML = sp.playing ? "&#9208;" : "&#9654;";
   document.querySelectorAll(".controls button").forEach(b => b.disabled = !sp.ok);
+
+  const ota = s.ota;
+  $("kver").textContent = "Versione: " + (short(ota.kindle) || "sconosciuta");
+  $("klatest").textContent = !ota.configured ? "Aggiornamenti non configurati sull'Arduino"
+    : !ota.latest ? "" : ota.latest === ota.kindle ? "Aggiornato" : "Disponibile: " + short(ota.latest);
+  $("ota").disabled = !ota.configured;
 }
 
 async function refresh() {
@@ -150,6 +168,10 @@ async function refresh() {
 document.querySelectorAll(".controls button").forEach(b => b.onclick = () => {
   get("/api/cmd?a=" + b.dataset.a).catch(() => {}).finally(() => setTimeout(refresh, 800));
 });
+$("ota").onclick = () => get("/api/ota").then(() => {
+  $("otamsg").textContent = "Richiesta inviata: il Kindle controlla tra pochi secondi e, se c'è una versione nuova, si aggiorna e riparte.";
+  $("otamsg").hidden = false;
+}).catch(() => {});
 setInterval(() => document.visibilityState === "visible" && refresh(), 3000);
 document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && refresh());
 refresh();

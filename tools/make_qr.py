@@ -38,9 +38,12 @@ def shell_quote(s):
 
 
 def arduino_host_from_config():
-    config = (ROOT / "kindle/config.sh").read_text()
-    m = re.search(r'^ARDUINO_HOST="([^"]+)"', config, re.M)
-    return m.group(1) if m else ""
+    for name in ("config.sh", "defaults.sh"):  # la configurazione locale vince
+        path = ROOT / "kindle" / name
+        m = re.search(r'^ARDUINO_HOST="([^"]+)"', path.read_text(), re.M) if path.exists() else None
+        if m:
+            return m.group(1)
+    return ""
 
 
 def make(out_dir, ssid, password, security, app_url):
@@ -62,7 +65,7 @@ def main():
     p.add_argument("--ssid", help="nome della rete (se assente viene chiesto)")
     p.add_argument("--security", default="WPA", choices=["WPA", "WEP"],
                    help="WPA vale anche per WPA2/WPA3 (default: WPA)")
-    p.add_argument("--app-url", help="indirizzo della webapp (default: http://ARDUINO_HOST/ da kindle/config.sh)")
+    p.add_argument("--app-url", help="indirizzo della webapp (default: http://ARDUINO_HOST/ da kindle/config.sh o defaults.sh)")
     p.add_argument("--out", default=ROOT / "kindle/qr", type=Path)
     args = p.parse_args()
 

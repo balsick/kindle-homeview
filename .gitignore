@@ -3,3 +3,4 @@ arduino/kindle_gateway/arduino_secrets.h
 /preview-qr.png
 kindle/qr/
 __pycache__/
+kindle/config.sh

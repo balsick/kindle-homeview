@@ -1,4 +1,6 @@
-# Configurazione del pannello: modifica qui, non in dashboard.sh.
+# Valori predefiniti del pannello. NON modificarlo sul Kindle: viene
+# sostituito dagli aggiornamenti OTA. Per cambiare un valore ridefiniscilo
+# in config.sh, che resta solo sul Kindle (vedi config.example.sh).
 
 ARDUINO_HOST="192.168.1.60"   # IP dell'UNO R4 WiFi (riservalo nel router)
 SHELLY_HOST="192.168.1.50"    # IP dello Shelly Plus RGBW PM (profilo "light", 4 canali)
@@ -31,7 +33,13 @@ POLL_SECONDS=5          # ogni quanto chiedere lo stato all'Arduino
 SHELLY_SYNC_SECONDS=15  # ogni quanto rileggere le luci (cambiate da webapp o app Shelly)
 FULL_REFRESH_MINUTES=30 # refresh completo periodico contro il ghosting
 
-DIR_BASE=/mnt/us/dashboard
-FBINK="$DIR_BASE/bin/fbink"
-FONT="$DIR_BASE/fonts/DejaVuSans.ttf"
-FONT_BOLD="$DIR_BASE/fonts/DejaVuSans-Bold.ttf"
+# Aggiornamenti OTA da GitHub, tramite l'Arduino (vedi ota.sh)
+OTA_ENABLED=1
+OTA_CHECK_HOURS=24      # controllo periodico; si può anche forzare dalla webapp
+OTA_HEALTH_SECONDS=45   # entro quanto la nuova versione deve dimostrare di funzionare
+
+# Percorsi locali, relativi alla cartella del pannello
+FBINK="$DIR/bin/fbink"
+FONT="$DIR/fonts/DejaVuSans.ttf"
+FONT_BOLD="$DIR/fonts/DejaVuSans-Bold.ttf"
+# ota:end

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Pannello domestico per Kindle 5 (firmware 4.1.x con jailbreak).
 #
-# Uso:  sh /mnt/us/dashboard/dashboard.sh start|stop|keytest
+# Uso:  sh /mnt/us/dashboard/dashboard.sh start|stop|restart|update|keytest
 #       (preview è usato da tools/preview.py per l'anteprima sul PC)
 #
 # Processi:
@@ -9,16 +9,14 @@
 #   - input (principale): legge la FIFO, aggiorna lo stato e ridisegna la riga della luce
 #   - sender: invia allo Shelly l'ultimo valore quando i tasti si fermano (debounce)
 #             e rilegge periodicamente lo stato delle luci
-#   - poller: legge /status dall'Arduino e ridisegna ora, meteo e Spotify
+#   - poller: legge /status dall'Arduino e ridisegna ora, meteo e Spotify;
+#             lancia anche il controllo degli aggiornamenti OTA (ota.sh)
 # Ogni zona dello schermo viene ridisegnata solo se il suo contenuto è cambiato.
 # Il tasto Home mostra i QR (WiFi ospiti e webapp); un tasto qualsiasi torna indietro.
 
 DIR=$(cd "$(dirname "$0")" && pwd)
-. "$DIR/config.sh"
-QR_DIR=${QR_DIR:-$DIR/qr}   # generata da tools/make_qr.py
-[ -f "$QR_DIR/info.sh" ] && . "$QR_DIR/info.sh"
+. "$DIR/lib.sh"   # configurazione (defaults.sh + config.sh) e http_get
 
-RUN=${RUN:-/tmp/dashboard}
 FBINK=${PREVIEW_FBINK:-$FBINK}
 SCREEN_W=600
 SCREEN_H=800
@@ -41,20 +39,6 @@ else
 fi
 
 # ---------- utilità ----------
-
-# http_get URL TIMEOUT_S FILE: wget con timeout fatto a mano, perché il wget
-# di BusyBox del Kindle potrebbe non supportare -T.
-http_get() {
-  rm -f "$3"
-  wget -q -O "$3" "$1" 2>/dev/null &
-  local pid=$!
-  ( sleep "$2"; kill "$pid" 2>/dev/null ) &
-  local killer=$!
-  wait "$pid"
-  local rc=$?
-  kill "$killer" 2>/dev/null
-  return $rc
-}
 
 # Carica le impostazioni delle luci in ID_n, NAME_n, HINT_n, PLUS_n, MINUS_n
 load_lights() {
@@ -154,7 +138,7 @@ show_qr() {
     text_c 300 28 "$FONT" "QR non configurati:"
     text_c 345 22 "$FONT" "esegui tools/make_qr.py sul PC"
   fi
-  text_c 762 18 "$FONT" "Premi un tasto per tornare"
+  text_c 762 18 "$FONT" "Premi un tasto per tornare  ·  versione $(printf '%.7s' "${VERSION:-dev}")"
   fb -f -s "top=0,left=0,width=$SCREEN_W,height=$SCREEN_H"
 }
 
@@ -368,10 +352,11 @@ draw_spotify() {
 }
 
 poller() {
-  local fails=0 n polls=0 since
+  local fails=0 n polls=0 since now ota_req=""
   local polls_per_full=$((FULL_REFRESH_MINUTES * 60 / POLL_SECONDS))
+  local ota_at=$(($(date +%s) + 120))   # primo controllo poco dopo l'avvio
   while true; do
-    if http_get "http://$ARDUINO_HOST/status" 8 "$RUN/status.new"; then
+    if http_get "http://$ARDUINO_HOST/status?v=$VERSION" 8 "$RUN/status.new"; then
       mv "$RUN/status.new" "$RUN/status"
       fails=0
     else
@@ -394,6 +379,16 @@ poller() {
       draw_header $([ $fails -ge 3 ] && echo 1 || echo 0)
       draw_weather
       draw_spotify
+    fi
+    : > "$RUN/alive"   # per ota.sh: il ciclo principale gira
+
+    # Aggiornamenti: periodici, o chiesti dalla webapp (ota_req cambia)
+    now=$(date +%s)
+    if [ -n "$ota_req" ] && [ "${S_ota_req:-}" != "$ota_req" ]; then ota_at=$now; fi
+    ota_req=${S_ota_req:-0}
+    if [ "$OTA_ENABLED" = 1 ] && [ "$now" -ge "$ota_at" ]; then
+      ota_at=$((now + OTA_CHECK_HOURS * 3600))
+      ota_start
     fi
 
     # Attesa interrompibile: dopo un comando Spotify si rilegge subito
@@ -480,6 +475,11 @@ run() {
   done
 }
 
+# Lancia ota.sh staccato dal pannello, che durante l'aggiornamento viene riavviato
+ota_start() {
+  ( trap '' HUP; exec sh "$DIR/ota.sh" update ) >> /tmp/dashboard-ota.log 2>&1 &
+}
+
 start() {
   if [ -f "$RUN/pid" ] && kill -0 "$(cat "$RUN/pid")" 2>/dev/null; then
     echo "Il pannello è già in esecuzione"
@@ -489,10 +489,14 @@ start() {
   echo "Pannello avviato (log in /tmp/dashboard.log)"
 }
 
-stop() {
+kill_panel() {
   [ -f "$RUN/pid" ] && kill "$(cat "$RUN/pid")" 2>/dev/null
   rm -f "$RUN/pid"
   sleep 1
+}
+
+stop() {
+  kill_panel
   lipc-set-prop com.lab126.powerd preventScreenSaver 0
   /etc/init.d/framework start >/dev/null 2>&1 &
   echo "Pannello fermato, interfaccia Kindle riavviata"
@@ -535,8 +539,11 @@ preview() {
 case "$1" in
   start) start ;;
   stop) stop ;;
+  restart) kill_panel; start ;;            # senza riaccendere l'interfaccia Kindle
+  update) sh "$DIR/ota.sh" update ;;       # controllo OTA a mano, con l'output a schermo
   run) run ;;
   keytest) keytest ;;
   preview) preview "$2" "$3" "$4" ;;
-  *) echo "Uso: sh $0 start|stop|keytest"; exit 1 ;;
+  *) echo "Uso: sh $0 start|stop|restart|update|keytest"; exit 1 ;;
 esac
+# ota:end

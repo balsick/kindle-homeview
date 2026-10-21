@@ -3,7 +3,7 @@
 
 Esegue "dashboard.sh preview" con un finto FBInk che registra i comandi, poi
 li ridisegna in un PNG 600x800. L'anteprima viene quindi dal codice vero: se
-modifichi il layout in dashboard.sh o config.sh, cambia anche lei.
+modifichi il layout in dashboard.sh o defaults.sh, cambia anche lei.
 
     python3 tools/preview.py                      # crea preview.png
     python3 tools/preview.py --watch              # la rigenera a ogni modifica
@@ -158,13 +158,13 @@ def main():
     build(args)
     if not args.watch:
         return
-    watched = [KINDLE_DIR / "dashboard.sh", KINDLE_DIR / "config.sh", args.status]
-    if (KINDLE_DIR / "qr/info.sh").exists():
-        watched.append(KINDLE_DIR / "qr/info.sh")
-    last = [f.stat().st_mtime for f in watched]
+    watched = [KINDLE_DIR / "dashboard.sh", KINDLE_DIR / "defaults.sh", KINDLE_DIR / "config.sh",
+               KINDLE_DIR / "qr/info.sh", args.status]
+    mtime = lambda f: f.stat().st_mtime if f.exists() else 0
+    last = [mtime(f) for f in watched]
     while True:
         time.sleep(0.5)
-        now = [f.stat().st_mtime for f in watched]
+        now = [mtime(f) for f in watched]
         if now != last:
             last = now
             try:

@@ -43,7 +43,8 @@ Spotify, Open-Meteo ◄─HTTPS── UNO R4 WiFi ──► Arduino Cloud (notif
 
 Con i QR a schermo un tasto qualsiasi torna al pannello senza fare altro. La
 schermata si chiude comunque da sola dopo 2 minuti (`QR_SECONDS`). Una fascia
-in basso riassume i tasti sotto lo schermo; il testo è `LEGEND` in `config.sh`.
+in basso riassume i tasti sotto lo schermo; il testo è `LEGEND` (in `defaults.sh`,
+ridefinibile in `config.sh`).
 
 Tenendo premuto un tasto luce la luminosità continua a cambiare. Allo Shelly viene
 inviato solo l'ultimo valore, quando i tasti si fermano (debounce). Con "−" dal
@@ -53,7 +54,7 @@ minimo la luce si spegne, con "+" da spenta si riaccende al minimo.
 
 - Riserva nel router un IP fisso per l'UNO R4 e uno per lo Shelly.
 - Shelly: profilo **Light** (4 canali). Le 3 luci sono sui canali 0, 1 e 2
-  (modificabili in `kindle/config.sh`). L'autenticazione dello Shelly deve
+  (modificabili in `config.sh` sul Kindle). L'autenticazione dello Shelly deve
   essere disattivata, perché lo script chiama l'API senza password.
 
 ## 2. Spotify
@@ -70,12 +71,15 @@ Per play, pausa e cambio brano serve Spotify Premium e un dispositivo attivo
 ## 3. Arduino UNO R4 WiFi
 
 1. Aggiorna il firmware del modulo WiFi (IDE → Strumenti → Firmware Updater).
-2. In `arduino/kindle_gateway/arduino_secrets.h` inserisci Client ID, Client
-   Secret e refresh token di Spotify. Il WiFi non va inserito: lo configura
-   Arduino Cloud.
+2. Copia `arduino_secrets.h.example` in `arduino_secrets.h` e inserisci Client
+   ID, Client Secret e refresh token di Spotify, più il token GitHub per l'OTA
+   del Kindle (vedi [Aggiornamenti OTA](#aggiornamenti-ota-del-kindle)). Il WiFi
+   non va inserito: lo configura Arduino Cloud. Un `arduino_secrets.h` creato
+   prima dell'OTA, senza `SECRET_GITHUB_TOKEN`, va ancora bene: l'OTA resta
+   solo disattivato.
 3. In `kindle_gateway.ino` imposta `LATITUDE` e `LONGITUDE`, poi `SHELLY_HOST`
-   e `LIGHTS` (nomi e canali delle luci per la webapp, uguali a quelli di
-   `kindle/config.sh`).
+   e `LIGHTS` (nomi e canali delle luci per la webapp, uguali a quelli del
+   Kindle).
 4. Librerie: **ArduinoIoTCloud** (con le dipendenze) e **ArduinoJson** 7.
 5. Carica lo sketch dal Cloud Editor, oppure dall'IDE se la scheda è già
    associata al Thing. `thingProperties.h` è quello generato dal tuo Thing.
@@ -99,10 +103,18 @@ volta, così il device non risulta offline senza motivo.
 3. **FBInk.** Scarica la build per Kindle legacy/K4 e copia il binario in
    `/mnt/us/dashboard/bin/fbink`.
 4. **Font.** Copia `DejaVuSans.ttf` e `DejaVuSans-Bold.ttf` in
-   `/mnt/us/dashboard/fonts/`. Altri font vanno bene, basta aggiornare
-   `config.sh`.
-5. Copia `kindle/dashboard.sh` e `kindle/config.sh` in `/mnt/us/dashboard/`.
-   Poi in `config.sh` imposta gli IP e i nomi delle luci.
+   `/mnt/us/dashboard/fonts/`. Altri font vanno bene, basta indicarli in
+   `config.sh` (`FONT`, `FONT_BOLD`).
+5. Copia in `/mnt/us/dashboard/` i file elencati in `kindle/ota-files`:
+   `lib.sh`, `defaults.sh`, `dashboard.sh`, `ota.sh` e `ota-files`. Poi copia
+   `kindle/config.example.sh` come `config.sh` e impostaci IP e nomi delle luci.
+   - `defaults.sh` contiene tutti i valori predefiniti e viene sostituito
+     dagli aggiornamenti OTA: non modificarlo.
+   - `config.sh` contiene solo quello che cambi tu e non viene mai toccato.
+
+   Se hai già un `config.sh` completo copiato da una versione precedente,
+   funziona ancora: viene letto dopo `defaults.sh` e ne sovrascrive i valori.
+   Puoi poi ridurlo alle sole righe che hai personalizzato.
 6. **QR.** Sul PC esegui `pip install segno` e poi `python3 tools/make_qr.py`.
    Ti chiede rete e password del WiFi ospiti e crea `kindle/qr/`. Copia la
    cartella in `/mnt/us/dashboard/qr/`. Contiene la password in chiaro, per
@@ -111,7 +123,8 @@ volta, così il device non risulta offline senza motivo.
    ```sh
    sh /mnt/us/dashboard/dashboard.sh keytest
    ```
-   Premi ogni tasto e confronta i codici con quelli in `config.sh`. Quelli
+   Premi ogni tasto e confronta i codici con quelli in `defaults.sh`; se
+   sono diversi, ridefiniscili in `config.sh`. Quelli
    preimpostati vengono dalla keymap del Kindle 4 di KOReader e vanno
    confermati, così come i device in `INPUT_DEVICES`.
 8. Avvio e arresto:
@@ -120,6 +133,61 @@ volta, così il device non risulta offline senza motivo.
    sh /mnt/us/dashboard/dashboard.sh stop    # torna al Kindle normale
    ```
    Il log è in `/tmp/dashboard.log`.
+
+## Aggiornamenti OTA del Kindle
+
+Il Kindle si aggiorna da solo dal ramo `main` di questo repository. Il Kindle
+non parla HTTPS, quindi i file passano dall'Arduino, che li legge da GitHub col
+token:
+
+```
+Kindle ──HTTP /ota/version, /ota/file──► UNO R4 ──HTTPS + token──► GitHub
+```
+
+**Token.** Su GitHub vai in *Settings → Developer settings → Fine-grained
+tokens* e crea un token con:
+- accesso solo al repository `kindle-homeview`;
+- permesso *Contents: Read-only*.
+
+Mettilo in `SECRET_GITHUB_TOKEN` in `arduino_secrets.h`. L'Arduino inoltra solo
+i file della cartella `kindle/` a un commit preciso, non il resto del
+repository.
+
+**Quando controlla.** Due minuti dopo l'avvio, poi ogni 24 ore
+(`OTA_CHECK_HOURS`). Puoi forzare un controllo in due modi:
+- dal pulsante *Aggiorna* della webapp, che mostra anche la versione in uso
+  sul Kindle e l'ultima disponibile;
+- via SSH, con l'output a schermo: `sh /mnt/us/dashboard/dashboard.sh update`.
+
+La versione in uso compare anche in fondo alla schermata dei QR. Il log è in
+`/tmp/dashboard-ota.log`.
+
+**Cosa viene aggiornato.** Solo i file elencati in `kindle/ota-files`. Non
+vengono mai toccati:
+- `config.sh`;
+- i QR;
+- FBInk;
+- i font.
+
+Ogni file aggiornabile deve finire con la riga `# ota:end`. Se aggiungi un file,
+mettilo anche in `ota-files`.
+
+**Protezioni.**
+1. I file vengono scaricati a parte e accettati solo se completi (c'è la riga
+   finale `# ota:end`). Gli script devono anche superare il controllo di
+   sintassi (`sh -n`). Se un solo file non va, l'aggiornamento viene annullato
+   senza toccare nulla.
+2. La versione in uso viene salvata in `.ota_prev/` prima di essere sostituita.
+3. Dopo il riavvio il pannello deve dimostrare di funzionare entro 45 secondi
+   (`OTA_HEALTH_SECONDS`). Se non ci riesce, si torna alla versione precedente.
+   Il commit difettoso viene scritto in `.ota_bad` e non viene più riprovato.
+
+Il controllo e il ripristino li fa il processo della versione vecchia, quindi
+funzionano anche se la versione nuova è difettosa. Resta un caso scoperto: una
+versione nuova che parte ma ha l'OTA rotto non può aggiornarsi da sola. In quel
+caso si corregge via SSH.
+
+Per disattivare l'OTA metti `OTA_ENABLED=0` in `config.sh`.
 
 ### Da verificare sul dispositivo
 
@@ -157,7 +225,7 @@ modifica `arduino/kindle_gateway/webapp.h` e ricarica la pagina.
 ```sh
 pip install pillow
 python3 tools/preview.py            # crea preview.png
-python3 tools/preview.py --watch    # la rigenera a ogni modifica di dashboard.sh/config.sh
+python3 tools/preview.py --watch    # la rigenera a ogni modifica di dashboard.sh/defaults.sh/config.sh
 python3 tools/preview.py --screen qr   # schermata dei QR (preview-qr.png)
 ```
 

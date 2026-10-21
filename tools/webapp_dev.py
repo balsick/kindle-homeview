@@ -27,6 +27,8 @@ state = {
     "sp": {"ok": True, "active": True, "playing": True, "track": "Bohemian Rhapsody - Remastered 2011",
            "artist": "Queen", "progress": 134, "duration": 354},
     "started": time.time(),
+    "ota": {"configured": True, "kindle": "88df910c0ffee000000000000000000000000000",
+            "latest": "ff9522edcb7ef9ff61ecda4cf4bbd11b04e9e0c5"},
 }
 
 
@@ -45,6 +47,7 @@ def api_state():
         "w": {"ok": True, "temp": "17,4", "desc": "Pioggia"},
         "lights": state["lights"],
         "sp": sp,
+        "ota": state["ota"],
     }
 
 
@@ -61,6 +64,9 @@ class Handler(BaseHTTPRequestHandler):
             light["on"] = q.get("on") == "1"
             if light["on"]:
                 light["b"] = max(1, min(100, int(q.get("b", light["b"]))))
+            self.reply(200, "ok\n")
+        elif url.path == "/api/ota":
+            state["ota"]["kindle"] = state["ota"]["latest"]  # come se il Kindle si fosse aggiornato
             self.reply(200, "ok\n")
         elif url.path in ("/api/cmd", "/cmd"):
             a, sp = q.get("a"), state["sp"]

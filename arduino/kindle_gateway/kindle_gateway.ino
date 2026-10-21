@@ -13,6 +13,13 @@
     GET /api/state                 stato in JSON, luci comprese
     GET /api/light?i=N&on=1&b=50   accende/spegne/regola la luce N (indice in LIGHTS)
     GET /api/cmd?a=AZIONE          come /cmd
+    GET /api/ota                   chiede al Kindle di cercare aggiornamenti
+
+  E fa da tramite per gli aggiornamenti OTA del Kindle (repository privato,
+  token in arduino_secrets.h):
+
+    GET /ota/version                     ultimo commit del ramo GITHUB_BRANCH
+    GET /ota/file?sha=SHA&path=kindle/F  un file della cartella kindle/ a quel commit
 
   È anche un device Arduino Cloud: quando va via la corrente il device risulta
   offline e il trigger configurato sul Cloud manda la notifica. Il WiFi lo
@@ -27,6 +34,9 @@
 #include <WiFiS3.h>
 #include <ArduinoJson.h>
 #include "arduino_secrets.h"
+#ifndef SECRET_GITHUB_TOKEN  // arduino_secrets.h creato prima dell'OTA: OTA disattivato
+#define SECRET_GITHUB_TOKEN ""
+#endif
 #include "https_response.h"
 #include "webapp.h"
 
@@ -42,6 +52,10 @@ struct Light {
 };
 const Light LIGHTS[] = {{"Soggiorno", 0}, {"Cucina", 1}, {"Studio", 2}};
 const int NUM_LIGHTS = sizeof(LIGHTS) / sizeof(LIGHTS[0]);
+
+// Repository da cui il Kindle prende gli aggiornamenti
+const char* const GITHUB_REPO = "balsick/kindle-homeview";
+const char* const GITHUB_BRANCH = "main";
 
 const unsigned long SPOTIFY_POLL_PLAYING_MS = 5000;
 const unsigned long SPOTIFY_POLL_IDLE_MS = 20000;
@@ -82,6 +96,8 @@ String accessToken, refreshToken, basicAuth;
 unsigned long tokenAt = 0, tokenValidMs = 0;
 unsigned long epochAtSync = 0, millisAtSync = 0;
 unsigned long nextSpotifyAt = 0, nextWeatherAt = 0, nextNtpAt = 0;
+String kindleVersion, latestSha;  // per mostrarli nella webapp
+unsigned otaRequests = 0;         // il Kindle controlla quando il valore cambia
 
 bool due(unsigned long at) { return (long)(millis() - at) >= 0; }
 
@@ -492,6 +508,7 @@ String buildStatus() {
   kv(s, "sp_artist", sp.artist);
   kv(s, "sp_progress", String(spotifyProgressMs() / 1000));
   kv(s, "sp_duration", String(sp.durationMs / 1000));
+  kv(s, "ota_req", String(otaRequests));
   return s;
 }
 
@@ -535,6 +552,11 @@ String buildApiState() {
   s["progress"] = spotifyProgressMs() / 1000;
   s["duration"] = sp.durationMs / 1000;
 
+  JsonObject ota = doc["ota"].to<JsonObject>();
+  ota["configured"] = strlen(SECRET_GITHUB_TOKEN) > 0;
+  ota["kindle"] = kindleVersion;
+  ota["latest"] = latestSha;
+
   String out;
   serializeJson(doc, out);
   return out;
@@ -577,6 +599,70 @@ void sendCommandResult(WiFiClient& c, int code) {
   sendText(c, ok ? 200 : 502, ok ? "ok\n" : "errore " + String(code) + "\n");
 }
 
+// ---- GitHub (aggiornamenti OTA del Kindle) ----
+
+bool validSha(const String& sha) {
+  if (sha.length() != 40) return false;
+  for (unsigned i = 0; i < sha.length(); i++) {
+    if (!isHexadecimalDigit(sha[i]) || isUpperCase(sha[i])) return false;
+  }
+  return true;
+}
+
+Response githubApi(const String& path, const char* accept) {
+  return httpsRequest("api.github.com", "GET", path,
+                      String("Authorization: Bearer ") + SECRET_GITHUB_TOKEN + "\r\n"
+                      "Accept: " + accept + "\r\n"
+                      "User-Agent: kindle-homeview\r\n"
+                      "X-GitHub-Api-Version: 2022-11-28\r\n", "");
+}
+
+void sendLatestVersion(WiFiClient& c) {
+  if (strlen(SECRET_GITHUB_TOKEN) == 0) {
+    sendText(c, 503, "OTA non configurato: manca SECRET_GITHUB_TOKEN\n");
+    return;
+  }
+  Response r = githubApi(String("/repos/") + GITHUB_REPO + "/commits/" + GITHUB_BRANCH,
+                         "application/vnd.github.sha");
+  String sha;
+  if (r.code == 200) {
+    BodyStream body(tls, r);
+    sha = body.readString();
+    sha.trim();
+  }
+  tls.stop();
+  if (!validSha(sha)) {
+    sendText(c, 502, "GitHub: HTTP " + String(r.code) + "\n");
+    return;
+  }
+  latestSha = sha;
+  sendText(c, 200, sha + "\n");
+}
+
+// Inoltra un file del repository. Solo la cartella kindle/ e solo a un commit
+// preciso, così l'Arduino non diventa un accesso libero al repository.
+void sendRepoFile(WiFiClient& c, const String& sha, const String& path) {
+  if (!validSha(sha) || !path.startsWith("kindle/") || path.indexOf("..") >= 0) {
+    sendText(c, 400, "richiesta non valida\n");
+    return;
+  }
+  Response r = githubApi(String("/repos/") + GITHUB_REPO + "/contents/" + path + "?ref=" + sha,
+                         "application/vnd.github.raw");
+  if (r.code != 200) {
+    tls.stop();
+    sendText(c, 502, "GitHub: HTTP " + String(r.code) + "\n");
+    return;
+  }
+  c.print("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n");
+  if (!r.chunked && r.length >= 0) c.print("Content-Length: " + String(r.length) + "\r\n");
+  c.print("\r\n");
+  BodyStream body(tls, r);
+  uint8_t buf[256];
+  size_t n;
+  while ((n = body.readBytes(buf, sizeof buf)) > 0) c.write(buf, n);
+  tls.stop();
+}
+
 void handleClient() {
   WiFiClient c = server.available();
   if (!c) return;
@@ -589,8 +675,17 @@ void handleClient() {
   int a = request.indexOf(' '), b = request.indexOf(' ', a + 1);
   String path = request.substring(a + 1, b);
 
-  if (path == "/status") {
+  if (path == "/status" || path.startsWith("/status?")) {
+    String v = queryParam(path, "v");  // versione in uso sul Kindle
+    if (validSha(v)) kindleVersion = v;
     sendText(c, 200, buildStatus());
+  } else if (path == "/ota/version") {
+    sendLatestVersion(c);
+  } else if (path.startsWith("/ota/file?")) {
+    sendRepoFile(c, queryParam(path, "sha"), queryParam(path, "path"));
+  } else if (path == "/api/ota") {
+    otaRequests++;
+    sendText(c, 200, "ok\n");
   } else if (path.startsWith("/cmd?") || path.startsWith("/api/cmd?")) {
     sendCommandResult(c, spotifyCommand(queryParam(path, "a")));
   } else if (path == "/" || path.startsWith("/?")) {
