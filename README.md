@@ -93,6 +93,41 @@ Il trigger di Arduino Cloud sullo stato del device resta com'è. Lo sketch chiam
 `ArduinoCloud.update()` a ogni giro e fa al massimo un'operazione HTTPS per
 volta, così il device non risulta offline senza motivo.
 
+**Variabili del Thing.** Il Thing ha sei variabili di diagnostica, tutte in
+sola lettura (sono in `thingProperties.h`, che va tenuto uguale al Thing):
+
+| Variabile | Tipo | Significato |
+|---|---|---|
+| `uptimeMin` | INT | minuti dall'avvio: se torna a 0 la scheda è ripartita |
+| `lastError` | CHARSTRING | ultimo errore (meteo, Spotify, watchdog) |
+| `lastReset` | CHARSTRING | motivo dell'ultimo riavvio: accensione, watchdog, software |
+| `weatherOk` | STATUS | l'ultimo aggiornamento del meteo è andato a buon fine |
+| `spotifyOk` | STATUS | Spotify risponde |
+| `kindleOnline` | STATUS | il Kindle ha chiesto `/status` negli ultimi 2 minuti |
+
+Su `kindleOnline` puoi mettere un trigger, come per lo stato del device, per
+sapere quando il pannello si spegne.
+
+**Watchdog.** Se `loop()` resta bloccata per un minuto, il watchdog hardware
+resetta la scheda. Se il Cloud resta scollegato per 10 minuti, anche
+col WiFi giù, la scheda si riavvia da sola e così resetta anche il modulo WiFi.
+Dopo il riavvio `lastReset` ne riporta il motivo.
+
+**Memoria.** L'UNO R4 ha 32 KB di RAM e lo sketch è al limite. Sono scelte
+fatte apposta, misurate sulla scheda:
+- `setup()` e `loop()` girano su uno stack di 2 KB dello sketch (il core ne dà
+  1 KB, ma il parsing JSON arriva a ~1,7 KB e sconfinava nell'heap);
+- le richieste HTTPS usano `ChunkedSSLClient`, che legge dal modulo WiFi 512
+  byte per volta: con i 1023 di `WiFiSSLClient`, quando l'heap è frammentato
+  l'allocazione fallisce e la scheda si blocca;
+- le risposte piccole (meteo, token di Spotify) si leggono tutte prima del
+  parsing;
+- niente agente Bluetooth nel Network Configurator: costava ~1,6 KB. Per
+  cambiare rete WiFi collega la scheda via USB e configurala dal Cloud.
+
+Se cambi lo sketch, guarda la riga `Memoria:` che stampa ogni 5 minuti sulla
+seriale (stack e heap liberi).
+
 ## 4. Kindle
 
 > **Attenzione ai nomi.** Su MobileRead "K5" indica i Kindle con firmware 5.x
@@ -102,8 +137,10 @@ volta, così il device non risulta offline senza motivo.
 1. **Jailbreak.** Usa il jailbreak per Kindle 4/5 non touch dal thread di NiLuJe
    su MobileRead (Kindle Developer's Corner) e segui il README del pacchetto.
 2. **USBNetwork.** Installalo dallo stesso thread e abilita SSH via WiFi.
-3. **FBInk.** Scarica la build per Kindle legacy/K4 e copia il binario in
-   `/mnt/us/dashboard/bin/fbink`.
+3. **FBInk.** Va bene quello della build `kindle-legacy` di KOReader (release
+   su GitHub, file `koreader/fbink`): copialo in `/mnt/us/dashboard/bin/fbink`.
+   Quella build non sa disegnare immagini, per questo i QR si copiano nel
+   framebuffer dai file `.raw` di `make_qr.py`.
 4. **Font.** Copia `DejaVuSans.ttf` e `DejaVuSans-Bold.ttf` in
    `/mnt/us/dashboard/fonts/`. Altri font vanno bene, basta indicarli in
    `config.sh` (`FONT`, `FONT_BOLD`).
@@ -215,17 +252,17 @@ Per disattivare l'OTA metti `OTA_ENABLED=0` in `config.sh`.
 
 ### Da verificare sul dispositivo
 
-Lo script è stato provato su PC con un FBInk finto, un server finto e
-eventi tasto simulati. Sul Kindle vero ci sono alcune cose che non ho potuto
-verificare:
-- **Opzioni di FBInk** (`-k`, `-s`, `-t px=…`, `-g … halign=CENTER`, `-B`):
-  controlla con `fbink -h` che la tua versione le supporti. Sono usate solo
-  nelle funzioni `fb`, `zone_*`, `text*`, `rect` e `image` di `dashboard.sh`.
-- **`od -tu2`** nel BusyBox del Kindle: se `keytest` non stampa nulla, il
-  problema è lì.
-- **Wi-Fi a framework fermo**: dovrebbe restare connesso. Se non è così, va
-  gestito con `lipc`.
-- **Avvio automatico al boot**: da aggiungere quando tutto funziona.
+Provato su un Kindle 5 (firmware 4.1.4) col FBInk di KOReader. Cose da sapere:
+- il BusyBox del Kindle è il 1.7.2: niente `od`, niente `command -v`, `grep`
+  senza `-E`. Gli script usano `hexdump`, `which` e `grep` semplice;
+- i codici dei tasti pagina erano diversi da quelli della keymap di KOReader:
+  `keytest` li mostra, poi vanno in `config.sh` (`LIGHT_KEYS`);
+- USBNetwork: con SSH via WiFi (`K3_WIFI="true"`) il dropbear del pacchetto
+  accetta solo chiavi RSA, non ed25519;
+- da macOS, i file `._*` che il Finder lascia sul disco del Kindle fanno
+  fallire gli aggiornamenti `.bin` (errore U007): cancellali prima;
+- da verificare ancora: Wi-Fi a framework fermo per molte ore, e l'avvio
+  automatico al boot.
 
 ## Webapp
 

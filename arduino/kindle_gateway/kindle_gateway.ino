@@ -32,6 +32,11 @@
 
 #include "thingProperties.h"
 #include <WiFiS3.h>
+#include "Modem.h"         // modem e comandi AT, per ChunkedSSLClient
+#include "WiFiCommands.h"
+#include <WDT.h>
+#include "FspTimer.h"
+#include <malloc.h>
 #include <ArduinoJson.h>
 #include "arduino_secrets.h"
 #ifndef SECRET_GITHUB_TOKEN  // arduino_secrets.h creato prima dell'OTA: OTA disattivato
@@ -67,8 +72,55 @@ const char* const MONTHS[] = {"gennaio", "febbraio", "marzo", "aprile", "maggio"
                               "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"};
 
 WiFiServer server(80);
-WiFiSSLClient tls;
-WiFiClient plain;  // HTTP in chiaro verso lo Shelly
+const unsigned long ACCEPT_INTERVAL_MS = 50;
+// Client TLS che legge dal modulo WiFi al massimo SSL_CHUNK byte per volta.
+// WiFiSSLClient ne chiede fino a 1023 e li riceve in una std::string che cresce
+// un byte alla volta: le riallocazioni chiedono un blocco contiguo di ~3 KB.
+// Con l'heap frammentato a volte non c'è, e allora abort() blocca la scheda.
+// Qui lo spazio è riservato prima (assign e clear non lo rilasciano) e il
+// blocco serve una volta sola, di SSL_CHUNK byte.
+const size_t SSL_CHUNK = 512;
+
+class ChunkedSSLClient : public WiFiSSLClient {
+ public:
+  int read() override {
+    uint8_t b;
+    return read(&b, 1) == 1 ? b : -1;
+  }
+
+  int read(uint8_t* buf, size_t size) override {
+    if (_sock < 0 || !rx_buffer) return 0;
+    if ((size_t)rx_buffer->available() < size) fill();
+    int n = 0;
+    for (size_t i = 0; i < size; i++) {
+      bool ok = false;
+      uint8_t v = rx_buffer->read(&ok);
+      if (!ok) break;
+      buf[n++] = v;
+    }
+    return n;
+  }
+
+ private:
+  void fill() {
+    size_t size = rx_buffer->freePositions() - 1;
+    if (size > SSL_CHUNK) size = SSL_CHUNK;
+    if (size == 0) return;
+    std::string res;
+    res.reserve(size + 16);
+    modem.begin();
+    modem.avoid_trim_results();  // come in WiFiSSLClient::_read(): valgono una volta sola
+    modem.read_using_size();
+    if (modem.write(std::string(PROMPT(_SSLCLIENTRECEIVE)), res, "%s%d,%d\r\n",
+                    CMD_WRITE(_SSLCLIENTRECEIVE), _sock, size)) {
+      for (size_t i = 0; i < res.size() && i < size; i++) rx_buffer->store((uint8_t)res[i]);
+    }
+  }
+};
+
+ChunkedSSLClient tls;
+// Niente WiFiClient globale per lo Shelly: in WiFiS3 ogni WiFiClient alloca 1 KB
+// di buffer appena costruito, e la RAM non basta. Lo creiamo solo quando serve.
 
 // ---- Stato ----
 struct {
@@ -94,9 +146,16 @@ unsigned long tokenAt = 0, tokenValidMs = 0;
 unsigned long epochAtSync = 0, millisAtSync = 0;
 unsigned long nextSpotifyAt = 0, nextWeatherAt = 0, nextNtpAt = 0;
 String kindleVersion, latestVersion;  // per mostrarli nella webapp
+unsigned long kindleSeenAt = 0;  // ultima richiesta del Kindle a /status
 unsigned otaRequests = 0;         // il Kindle controlla quando il valore cambia
 
 bool due(unsigned long at) { return (long)(millis() - at) >= 0; }
+
+// Scrive l'errore sulla seriale e nella variabile lastError del Thing
+void logError(const String& msg) {
+  Serial.println(msg);
+  lastError = msg;
+}
 
 // ---- Client HTTP/HTTPS ----
 
@@ -136,6 +195,12 @@ Response httpsRequest(const char* host, const char* method, const String& path,
                       const String& headers, const String& body) {
   return httpRequest(tls, host, 443, 5000, method, path, headers, body);
 }
+
+const size_t WEATHER_MAX_BYTES = 4096;
+const size_t TOKEN_MAX_BYTES = 2048;
+
+class BodyStream;
+String readBody(Client& c, const Response& r, size_t maxBytes);
 
 // Legge il corpo della risposta decodificando al volo il "chunked", così
 // ArduinoJson fa il parsing in streaming senza caricare tutto in RAM.
@@ -193,6 +258,16 @@ class BodyStream : public Stream {
   int peeked_ = -1;
 };
 
+// Legge tutto il corpo (al massimo maxBytes) in una String
+String readBody(Client& c, const Response& r, size_t maxBytes) {
+  BodyStream body(c, r);
+  String out;
+  out.reserve(r.length > 0 && (size_t)r.length < maxBytes ? r.length : 1024);
+  int ch;
+  while (out.length() < maxBytes && (ch = body.read()) >= 0) out += (char)ch;
+  return out;
+}
+
 String base64(const String& in) {
   static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   String out;
@@ -215,11 +290,16 @@ bool refreshSpotifyToken() {
                    "Content-Type: application/x-www-form-urlencoded\r\n";
   Response r = httpsRequest("accounts.spotify.com", "POST", "/api/token", headers,
                             "grant_type=refresh_token&refresh_token=" + refreshToken);
+  // Risposta piccola: la leggiamo tutta prima del parsing, come per il meteo
+  String json = r.code > 0 ? readBody(tls, r, TOKEN_MAX_BYTES) : String();
+  tls.stop();
   bool ok = false;
   if (r.code == 200) {
-    BodyStream body(tls, r);
     JsonDocument doc;
-    if (!deserializeJson(doc, body)) {
+    DeserializationError err = deserializeJson(doc, json);
+    if (err) {
+      logError(String("Spotify: risposta del token illeggibile (") + err.c_str() + ")");
+    } else {
       accessToken = doc["access_token"] | "";
       tokenAt = millis();
       tokenValidMs = ((doc["expires_in"] | 3600) - 60) * 1000UL;
@@ -227,12 +307,11 @@ bool refreshSpotifyToken() {
       // (solo in RAM: dopo un riavvio si riparte da quello in arduino_secrets.h).
       if (doc["refresh_token"].is<const char*>()) refreshToken = doc["refresh_token"].as<const char*>();
       ok = accessToken.length() > 0;
+      if (!ok) logError("Spotify: risposta del token senza access_token");
     }
   } else {
-    Serial.print("Spotify: rinnovo token fallito, HTTP ");
-    Serial.println(r.code);
+    logError("Spotify: rinnovo token fallito, HTTP " + String(r.code) + " " + json.substring(0, 80));
   }
-  tls.stop();
   return ok;
 }
 
@@ -286,8 +365,7 @@ void updateNowPlaying() {
     }
   } else {
     sp.ok = false;
-    Serial.print("Spotify: now playing fallito, HTTP ");
-    Serial.println(r.code);
+    logError("Spotify: now playing fallito, HTTP " + String(r.code));
     if (r.code == 429) next = 60000;  // rate limit
   }
   tls.stop();
@@ -317,6 +395,7 @@ int spotifyCommand(String action) {
 // ---- Shelly (per la webapp) ----
 
 bool shellyRpc(const String& path, JsonDocument& doc) {
+  WiFiClient plain;  // HTTP in chiaro verso lo Shelly
   Response r = httpRequest(plain, SHELLY_HOST, 80, 2000, "GET", path, "", "");
   bool ok = r.code == 200;
   if (ok) {
@@ -379,19 +458,30 @@ void updateWeather() {
           "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
           "&timezone=auto&forecast_days=3";
 
+  Serial.println("Meteo: aggiornamento");
   Response r = httpsRequest("api.open-meteo.com", "GET", path, "", "");
   bool ok = false;
   if (r.code == 200) {
-    BodyStream body(tls, r);
+    // La risposta è piccola (~1 KB): la leggiamo tutta e chiudiamo la
+    // connessione prima del parsing. Così il parser non legge dalla rete mentre
+    // è in ricorsione (meno stack) e una connessione lenta non lo blocca.
+    String json = readBody(tls, r, WEATHER_MAX_BYTES);
+    tls.stop();
     JsonDocument doc;
-    if (!deserializeJson(doc, body)) {
-      JsonObject cur = doc["current"];
+    DeserializationError err = deserializeJson(doc, json);
+    JsonObject cur = doc["current"];
+    JsonObject daily = doc["daily"];
+    // Accettiamo solo risposte complete: altrimenti teniamo i dati precedenti
+    if (err || doc.overflowed() || cur["temperature_2m"].isNull() || daily["weather_code"].size() < 3 ||
+        daily["temperature_2m_min"].size() < 3 || daily["temperature_2m_max"].size() < 3) {
+      logError(String("Meteo: risposta incompleta (") + err.c_str() + ", previsioni " +
+               daily["weather_code"].size() + ")");
+    } else {
       wx.temp = cur["temperature_2m"];
       wx.feels = cur["apparent_temperature"];
       wx.hum = cur["relative_humidity_2m"];
       wx.wind = lroundf(cur["wind_speed_10m"].as<float>());
       wx.code = cur["weather_code"];
-      JsonObject daily = doc["daily"];
       for (int i = 0; i < 3; i++) {
         wx.dCode[i] = daily["weather_code"][i];
         wx.dMin[i] = lroundf(daily["temperature_2m_min"][i].as<float>());
@@ -402,11 +492,12 @@ void updateWeather() {
       ok = true;
     }
   } else {
-    Serial.print("Meteo: richiesta fallita, HTTP ");
-    Serial.println(r.code);
+    logError("Meteo: richiesta fallita, HTTP " + String(r.code));
   }
   tls.stop();
   wx.ok = wx.ok || ok;  // in caso di errore teniamo gli ultimi dati validi
+  weatherOk = ok;
+  if (ok) Serial.println("Meteo: ok");
   nextWeatherAt = millis() + (ok ? WEATHER_POLL_MS : WEATHER_RETRY_MS);
 }
 
@@ -676,9 +767,17 @@ void sendRepoFile(WiFiClient& c, const String& tag, const String& path) {
 }
 
 void handleClient() {
-  WiFiClient c = server.available();
+  // accept() costruisce un WiFiClient, cioè alloca e libera 1 KB di heap, anche
+  // quando non c'è nessuno: chiamarla a ogni giro frammenta l'heap. 50 ms bastano.
+  static unsigned long acceptAt = 0;
+  if (millis() - acceptAt < ACCEPT_INTERVAL_MS) return;
+  acceptAt = millis();
+  // accept() restituisce ogni nuova connessione, anche quelle che non mandano
+  // nulla (i browser ne aprono in anticipo): così le chiudiamo dopo il timeout
+  // invece di lasciarle occupare i pochi socket del modulo WiFi.
+  WiFiClient c = server.accept();
   if (!c) return;
-  c.setTimeout(2000);
+  c.setTimeout(1000);
   String request = c.readStringUntil('\n');  // es. "GET /cmd?a=next HTTP/1.1"
   while (c.connected()) {                    // salta gli header
     String h = c.readStringUntil('\n');
@@ -690,6 +789,7 @@ void handleClient() {
   if (path == "/status" || path.startsWith("/status?")) {
     String v = queryParam(path, "v");  // versione in uso sul Kindle
     if (releaseNumber(v) >= 0) kindleVersion = v;
+    kindleSeenAt = millis();
     sendText(c, 200, buildStatus());
   } else if (path == "/ota/version") {
     sendLatestVersion(c);
@@ -716,9 +816,130 @@ void handleClient() {
   c.stop();
 }
 
+// ---- Watchdog e diagnostica ----
+// Il WDT hardware dell'R4 arriva al massimo a ~5,6 s, troppo poco per una
+// richiesta HTTPS lenta. Lo rinfresca un timer a 4 Hz, ma solo finché loop()
+// gira: se loop() resta bloccata per LOOP_STUCK_MS il timer smette e il WDT
+// resetta la scheda. Se invece loop() gira ma il Cloud resta scollegato per
+// CLOUD_STUCK_MS, la scheda si resetta da sola: al riavvio WiFiS3 resetta anche
+// il modulo WiFi. Il controllo non guarda WiFi.status(), perché con il modulo
+// WiFi bloccato anche quello risponde "non connesso".
+// Durante un OTA del Cloud loop() può restare ferma a lungo mentre il modulo
+// WiFi scarica il firmware: in quel caso si tollera fino a OTA_STUCK_MS.
+// Per OTA_PAUSE_MS dall'annuncio dell'OTA lo sketch non usa la rete (né
+// server né HTTPS): i comandi al modulo WiFi durante il download lo bloccano.
+const unsigned long LOOP_STUCK_MS = 60UL * 1000;
+const unsigned long OTA_STUCK_MS = 5UL * 60 * 1000;
+const unsigned long OTA_WINDOW_MS = 10UL * 60 * 1000;
+const unsigned long OTA_PAUSE_MS = 3UL * 60 * 1000;
+const unsigned long CLOUD_STUCK_MS = 10UL * 60 * 1000;
+const unsigned long KINDLE_TIMEOUT_MS = 2UL * 60 * 1000;
+const unsigned long NET_SETTLE_MS = 5000;  // appena connesso il WiFi, DNS e Internet non sono ancora pronti
+
+FspTimer wdtTimer;
+
+volatile unsigned long loopAliveAt = 0;
+volatile unsigned long otaRequestAt = 0;  // 0 = nessun OTA in corso
+unsigned long cloudOkAt = 0;
+
+void wdtTick(timer_callback_args_t*) {
+  unsigned long now = millis();
+  bool ota = otaRequestAt != 0 && now - otaRequestAt < OTA_WINDOW_MS;
+  if (now - loopAliveAt < (ota ? OTA_STUCK_MS : LOOP_STUCK_MS)) WDT.refresh();
+}
+
+// Il Cloud la chiama quando arriva un OTA: lo accettiamo sempre, ma intanto
+// il watchdog diventa più tollerante
+bool onOtaRequest() {
+  otaRequestAt = millis() | 1;
+  return true;
+}
+
+bool otaPaused() { return otaRequestAt != 0 && millis() - otaRequestAt < OTA_PAUSE_MS; }
+
+void startWatchdog() {
+  uint8_t type;
+  int8_t ch = FspTimer::get_available_timer(type);
+  if (ch < 0 || !wdtTimer.begin(TIMER_MODE_PERIODIC, type, ch, 4.0f, 0.0f, wdtTick) ||
+      !wdtTimer.setup_overflow_irq() || !wdtTimer.open() || !wdtTimer.start()) {
+    logError("Watchdog: timer non disponibile, watchdog disattivato");
+    return;
+  }
+  WDT.begin(5000);
+}
+
+// Perché la scheda è ripartita (registro di reset del RA4M1), in lastReset
+void reportResetCause() {
+  if (R_SYSTEM->RSTSR1_b.WDTRF)
+    lastReset = "watchdog (loop bloccata)";
+  else if (R_SYSTEM->RSTSR1_b.SWRF) lastReset = "software (aggiornamento o Cloud scollegato)";
+  else lastReset = "accensione o tasto reset";
+  R_SYSTEM->RSTSR1 = 0;
+  Serial.println("Riavvio: " + lastReset);
+}
+
+void updateDiagnostics() {
+  static unsigned long memLogAt = 0;
+  uptimeMin = millis() / 60000;
+  if (millis() - memLogAt > 5UL * 60 * 1000) {
+    memLogAt = millis();
+    struct mallinfo mi = mallinfo();
+    Serial.println("Memoria: stack libero " + String(stackFreeBytes()) + " B, heap " + String(mi.uordblks) +
+                   " B usati, " + String(mi.fordblks) + " B liberi nell'arena");
+  }
+  spotifyOk = sp.configured && sp.ok;
+  kindleOnline = kindleSeenAt != 0 && millis() - kindleSeenAt < KINDLE_TIMEOUT_MS;
+}
+
+// ---- Stack ----
+// Il core dell'UNO R4 riserva solo 1 KB di stack. Il parsing JSON legge dalla
+// rete mentre è in ricorsione (e le letture passano per vsnprintf nel modem):
+// supera 1 KB e finisce sopra l'heap, cioè proprio sul documento JSON appena
+// allocato. Risultato: previsioni a zero o HardFault. Per questo setup() e
+// loop() girano su uno stack nostro, più grande; anche gli interrupt lo usano.
+const size_t APP_STACK_BYTES = 2048;  // picco misurato ~1,7 KB
+const uint32_t STACK_PAINT = 0xA5A5A5A5;
+alignas(8) uint32_t appStack[APP_STACK_BYTES / 4];
+
+// Chiama fn() con lo stack pointer in cima ad appStack, poi torna allo stack di prima
+void runOnAppStack(void (*fn)()) {
+  register void (*f)() asm("r4") = fn;
+  register uint32_t* top asm("r5") = appStack + APP_STACK_BYTES / 4;
+  asm volatile(
+      "mov r6, sp     \n"
+      "mov sp, r5     \n"
+      "sub sp, #8     \n"
+      "str r6, [sp]   \n"
+      "blx r4         \n"
+      "ldr r6, [sp]   \n"
+      "mov sp, r6     \n"
+      : "+r"(f), "+r"(top)
+      :
+      : "r0", "r1", "r2", "r3", "r6", "r12", "lr", "memory", "cc",
+        "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7");
+}
+
+// Byte di appStack mai usati dall'avvio (lo stack cresce verso il basso)
+int stackFreeBytes() {
+  int n = 0;
+  while (n < (int)APP_STACK_BYTES && appStack[n / 4] == STACK_PAINT) n += 4;
+  return n;
+}
+
 bool serverStarted = false;
+unsigned long wifiUpAt = 0;  // 0 = WiFi non connesso
+
+void appSetup();
+void appLoop();
 
 void setup() {
+  for (size_t i = 0; i < APP_STACK_BYTES / 4; i++) appStack[i] = STACK_PAINT;
+  runOnAppStack(appSetup);
+}
+
+void loop() { runOnAppStack(appLoop); }
+
+void appSetup() {
   Serial.begin(9600);
   delay(1500);  // dà tempo di aprire il Serial Monitor
 
@@ -727,14 +948,32 @@ void setup() {
   sp.configured = refreshToken.length() > 0;
 
   initProperties();  // in thingProperties.h
+  reportResetCause();
   ArduinoCloud.begin(ArduinoIoTPreferredConnection);
+  ArduinoCloud.onOTARequestCb(onOtaRequest);
   setDebugMessageLevel(2);
   ArduinoCloud.printDebugInfo();
+
+  loopAliveAt = cloudOkAt = millis();
+  startWatchdog();
 }
 
-void loop() {
+void appLoop() {
+  loopAliveAt = millis();
   ArduinoCloud.update();
-  if (WiFi.status() != WL_CONNECTED) return;
+  updateDiagnostics();
+  if (ArduinoCloud.connected()) cloudOkAt = millis();
+  if (millis() - cloudOkAt > CLOUD_STUCK_MS && !otaPaused()) {
+    Serial.println("Cloud scollegato da troppo tempo: riavvio");
+    delay(100);
+    NVIC_SystemReset();
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    wifiUpAt = 0;
+    return;
+  }
+  if (wifiUpAt == 0) wifiUpAt = millis();
+  if (otaPaused()) return;
   if (!serverStarted && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
     server.begin();
     serverStarted = true;
@@ -744,6 +983,7 @@ void loop() {
   }
 
   handleClient();
+  if (millis() - wifiUpAt < NET_SETTLE_MS) return;
   // Al massimo un'operazione lenta per giro, così il Cloud viene servito spesso
   if (due(nextNtpAt)) syncTime();
   else if (due(nextWeatherAt)) updateWeather();
