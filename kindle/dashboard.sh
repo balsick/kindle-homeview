@@ -1,7 +1,7 @@
 #!/bin/sh
 # Pannello domestico per Kindle 5 (firmware 4.1.x con jailbreak).
 #
-# Uso:  sh /mnt/us/dashboard/dashboard.sh start|stop|restart|update|keytest
+# Uso:  sh /mnt/us/dashboard/dashboard.sh start|stop|restart|update|keytest|autostart on|off
 #       (preview è usato da tools/preview.py per l'anteprima sul PC)
 #
 # Processi:
@@ -550,6 +550,43 @@ preview() {
   draw_spotify
 }
 
+# ---------- avvio al boot ----------
+# Installa (on) o toglie (off) /etc/init.d/dashboard, lanciato al boot come
+# S99dashboard dopo l'interfaccia Kindle. Lo script non blocca il boot: in
+# background aspetta il WiFi, poi avvia il pannello. Per saltare un avvio
+# senza toglierlo basta creare $DIR/NO_AUTOSTART.
+INIT_SCRIPT=/etc/init.d/dashboard
+INIT_LINK=/etc/rc5.d/S99dashboard
+
+autostart() { # on|off
+  mount -o rw,remount / || return 1
+  rm -f "$INIT_LINK" "$INIT_SCRIPT"
+  if [ "$1" = on ]; then
+    cat > "$INIT_SCRIPT" <<INIT
+#!/bin/sh
+# Pannello domestico (kindle-homeview): creato da dashboard.sh autostart on
+[ "\$1" = start ] || exit 0
+[ -f "$DIR/NO_AUTOSTART" ] && exit 0
+[ -f "$DIR/dashboard.sh" ] || exit 0
+(
+  i=0
+  while [ \$i -lt 180 ]; do
+    [ "\$(lipc-get-prop com.lab126.wifid cmState 2>/dev/null)" = CONNECTED ] && break
+    sleep 2; i=\$((i + 2))
+  done
+  sleep 15   # lasciamo finire l'avvio dell'interfaccia Kindle
+  sh "$DIR/dashboard.sh" start
+) > /tmp/dashboard-boot.log 2>&1 &
+exit 0
+INIT
+    chmod 755 "$INIT_SCRIPT"
+    ln -s ../init.d/dashboard "$INIT_LINK"
+  fi
+  sync
+  mount -o ro,remount /
+  if [ "$1" = on ]; then echo "Avvio al boot attivato"; else echo "Avvio al boot disattivato"; fi
+}
+
 case "$1" in
   start) start ;;
   stop) stop ;;
@@ -557,7 +594,8 @@ case "$1" in
   update) sh "$DIR/ota.sh" update ;;       # controllo OTA a mano, con l'output a schermo
   run) run ;;
   keytest) keytest ;;
+  autostart) autostart "$2" ;;
   preview) preview "$2" "$3" "$4" ;;
-  *) echo "Uso: sh $0 start|stop|restart|update|keytest"; exit 1 ;;
+  *) echo "Uso: sh $0 start|stop|restart|update|keytest|autostart on|off"; exit 1 ;;
 esac
 # ota:end

@@ -172,6 +172,16 @@ seriale (stack e heap liberi).
    sh /mnt/us/dashboard/dashboard.sh stop    # torna al Kindle normale
    ```
    Il log è in `/tmp/dashboard.log`.
+9. **Avvio al boot.**
+   ```sh
+   sh /mnt/us/dashboard/dashboard.sh autostart on    # off per toglierlo
+   ```
+   Installa `/etc/init.d/dashboard` (avviato come `S99dashboard`): al boot
+   aspetta il WiFi e avvia il pannello, in background, senza bloccare l'avvio.
+   Per saltare un avvio crea `/mnt/us/dashboard/NO_AUTOSTART`. Perché SSH resti
+   raggiungibile dopo un riavvio, in `usbnet/` rinomina `DISABLED_auto` in
+   `auto` e metti `K3_WIFI_SSHD_ONLY="true"` in `usbnet/etc/config`: parte
+   solo SSH e il Kindle resta visibile come disco USB.
 
 ## Aggiornamenti OTA del Kindle
 
@@ -261,8 +271,7 @@ Provato su un Kindle 5 (firmware 4.1.4) col FBInk di KOReader. Cose da sapere:
   accetta solo chiavi RSA, non ed25519;
 - da macOS, i file `._*` che il Finder lascia sul disco del Kindle fanno
   fallire gli aggiornamenti `.bin` (errore U007): cancellali prima;
-- da verificare ancora: Wi-Fi a framework fermo per molte ore, e l'avvio
-  automatico al boot.
+- da verificare ancora: Wi-Fi a framework fermo per molte ore.
 
 ## Webapp
 
