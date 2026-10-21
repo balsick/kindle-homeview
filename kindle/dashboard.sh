@@ -138,7 +138,7 @@ show_qr() {
     text_c 300 28 "$FONT" "QR non configurati:"
     text_c 345 22 "$FONT" "esegui tools/make_qr.py sul PC"
   fi
-  text_c 762 18 "$FONT" "Premi un tasto per tornare  ·  versione $(printf '%.7s' "${VERSION:-dev}")"
+  text_c 762 18 "$FONT" "Premi un tasto per tornare  ·  versione ${VERSION:-dev}"
   fb -f -s "top=0,left=0,width=$SCREEN_W,height=$SCREEN_H"
 }
 

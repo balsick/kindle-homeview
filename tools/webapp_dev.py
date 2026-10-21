@@ -27,8 +27,7 @@ state = {
     "sp": {"ok": True, "active": True, "playing": True, "track": "Bohemian Rhapsody - Remastered 2011",
            "artist": "Queen", "progress": 134, "duration": 354},
     "started": time.time(),
-    "ota": {"configured": True, "kindle": "88df910c0ffee000000000000000000000000000",
-            "latest": "ff9522edcb7ef9ff61ecda4cf4bbd11b04e9e0c5"},
+    "ota": {"configured": True, "kindle": "kindle-v2", "latest": "kindle-v3"},
 }
 
 

@@ -1,8 +1,10 @@
 #!/bin/sh
-# Aggiornamento OTA del pannello dal ramo principale del repository GitHub.
+# Aggiornamento OTA del pannello dai rilasci del repository GitHub: i tag
+# kindle-vN (vedi tools/release_kindle.sh). Un push su main non basta: il
+# Kindle si aggiorna solo quando esce un tag con N più alto di quello in uso.
 # Il Kindle non parla HTTPS, quindi i file passano dall'Arduino:
-#   GET /ota/version                    commit attuale del ramo
-#   GET /ota/file?sha=SHA&path=kindle/F un file a quella revisione
+#   GET /ota/version                       nome dell'ultimo tag kindle-vN
+#   GET /ota/file?ref=TAG&path=kindle/F    un file a quel tag
 #
 # Uso: sh ota.sh update   (lo lancia dashboard.sh; a mano: dashboard.sh update)
 #
@@ -14,7 +16,7 @@
 #     esecuzione continuano a leggere la versione vecchia;
 #   - dopo il riavvio il pannello deve dimostrare di funzionare entro
 #     OTA_HEALTH_SECONDS, altrimenti si torna alla versione precedente e quel
-#     commit non viene più riprovato (.ota_bad).
+#     rilascio non viene più riprovato (.ota_bad).
 # Questo processo è quello della versione VECCHIA, che resta in memoria: il
 # ripristino quindi funziona anche se la versione nuova è difettosa.
 
@@ -28,15 +30,22 @@ PREV="$DIR/.ota_prev"
 BAD="$DIR/.ota_bad"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') ota: $*"; }
-short() { printf '%.7s' "$1"; }
 fail() { log "$*"; exit 1; }
+
+# release_num TAG: "kindle-v12" -> 12; niente se non è un tag di rilascio
+release_num() {
+  case "$1" in
+    kindle-v | kindle-v*[!0-9]*) ;;
+    kindle-v*) echo "${1#kindle-v}" ;;
+  esac
+}
 
 # File elencati nel manifest (righe non vuote che non iniziano con #)
 manifest_files() { grep -v '^#' "$1" | grep -v '^$'; }
 
-# fetch SHA PERCORSO FILE: scarica un file del repository e lo verifica
+# fetch TAG PERCORSO FILE: scarica un file del repository e lo verifica
 fetch() {
-  http_get "http://$ARDUINO_HOST/ota/file?sha=$1&path=$2" 60 "$3" || { log "$2: download fallito"; return 1; }
+  http_get "http://$ARDUINO_HOST/ota/file?ref=$1&path=$2" 60 "$3" || { log "$2: download fallito"; return 1; }
   [ "$(tail -n 1 "$3")" = "$MARKER" ] || { log "$2: file incompleto"; return 1; }
   case "$2" in
     *.sh) sh -n "$3" || { log "$2: errore di sintassi"; return 1; } ;;
@@ -48,7 +57,7 @@ healthy() {
   [ -f "$RUN/pid" ] && kill -0 "$(cat "$RUN/pid")" 2>/dev/null && [ -f "$RUN/alive" ]
 }
 
-rollback() { # SHA_SCARTATO
+rollback() { # TAG_SCARTATO
   log "la versione $1 non parte: ripristino la precedente"
   echo "$1" >> "$BAD"
   for f in "$PREV"/*; do
@@ -59,27 +68,29 @@ rollback() { # SHA_SCARTATO
 }
 
 update() {
-  local sha f
+  local tag num cur f
   [ "$OTA_ENABLED" = 1 ] || { log "OTA disattivato in config.sh"; return 0; }
   mkdir -p "$WORK"
   mkdir "$WORK/lock" 2>/dev/null || fail "aggiornamento già in corso"
   trap 'rm -rf "$WORK/lock"' EXIT
 
   http_get "http://$ARDUINO_HOST/ota/version" 30 "$WORK/version" || fail "Arduino non raggiungibile"
-  read -r sha < "$WORK/version"
-  case "$sha" in "" | *[!0-9a-f]*) fail "risposta non valida: $sha" ;; esac
-  [ ${#sha} -eq 40 ] || fail "risposta non valida: $sha"
-  if [ "$sha" = "$VERSION" ]; then log "già aggiornato ($(short "$sha"))"; return 0; fi
-  if grep -q "^$sha\$" "$BAD" 2>/dev/null; then log "la versione $sha era già stata scartata"; return 0; fi
+  read -r tag < "$WORK/version"
+  num=$(release_num "$tag")
+  [ -n "$num" ] || fail "risposta non valida: $tag"
+  cur=$(release_num "$VERSION")
+  # Mai all'indietro: se un tag sparisce, si resta sulla versione in uso
+  if [ -n "$cur" ] && [ "$num" -le "$cur" ]; then log "già aggiornato ($VERSION)"; return 0; fi
+  if grep -q "^$tag\$" "$BAD" 2>/dev/null; then log "la versione $tag era già stata scartata"; return 0; fi
 
-  log "aggiorno ${VERSION:+$(short "$VERSION") }-> $(short "$sha")"
+  log "aggiorno ${VERSION:-(versione iniziale)} -> $tag"
   rm -rf "$STAGE"
   mkdir -p "$STAGE"
-  fetch "$sha" kindle/ota-files "$STAGE/ota-files" || fail "aggiornamento annullato"
+  fetch "$tag" kindle/ota-files "$STAGE/ota-files" || fail "aggiornamento annullato"
   for f in $(manifest_files "$STAGE/ota-files"); do
     case "$f" in */* | .* ) fail "nome di file non ammesso: $f" ;; esac
     [ "$f" = ota-files ] && continue
-    fetch "$sha" "kindle/$f" "$STAGE/$f" || fail "aggiornamento annullato"
+    fetch "$tag" "kindle/$f" "$STAGE/$f" || fail "aggiornamento annullato"
   done
 
   # Copia della versione in uso, poi sostituzione file per file
@@ -90,17 +101,17 @@ update() {
   done
   echo "$VERSION" > "$PREV/VERSION"
   for f in $(manifest_files "$STAGE/ota-files"); do
-    cp "$STAGE/$f" "$DIR/$f.ota_tmp" && mv "$DIR/$f.ota_tmp" "$DIR/$f" || { rollback "$sha"; fail "copia fallita"; }
+    cp "$STAGE/$f" "$DIR/$f.ota_tmp" && mv "$DIR/$f.ota_tmp" "$DIR/$f" || { rollback "$tag"; fail "copia fallita"; }
   done
-  echo "$sha" > "$DIR/VERSION.ota_tmp" && mv "$DIR/VERSION.ota_tmp" "$DIR/VERSION"
+  echo "$tag" > "$DIR/VERSION.ota_tmp" && mv "$DIR/VERSION.ota_tmp" "$DIR/VERSION"
 
   log "riavvio il pannello"
   sh "$DIR/dashboard.sh" restart
   sleep "$OTA_HEALTH_SECONDS"
   if healthy; then
-    log "aggiornato a $sha"
+    log "aggiornato a $tag"
   else
-    rollback "$sha"
+    rollback "$tag"
     fail "aggiornamento annullato"
   fi
 }

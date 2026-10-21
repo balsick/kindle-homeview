@@ -25,6 +25,7 @@ Spotify, Open-Meteo ◄─HTTPS── UNO R4 WiFi ──► Arduino Cloud (notif
 | `kindle/` | Script del pannello, da copiare in `/mnt/us/dashboard/` sul Kindle |
 | `tools/get_spotify_token.py` | Ottiene il refresh token di Spotify (una volta, sul PC) |
 | `tools/make_qr.py` | Genera i QR del WiFi ospiti e della webapp |
+| `tools/release_kindle.sh` | Pubblica un aggiornamento OTA per il Kindle (tag `kindle-vN`) |
 | `tools/preview.py` | Anteprima della schermata del Kindle sul PC |
 | `tools/webapp_dev.py` | Anteprima della webapp nel browser, con API finte |
 
@@ -136,13 +137,35 @@ volta, così il device non risulta offline senza motivo.
 
 ## Aggiornamenti OTA del Kindle
 
-Il Kindle si aggiorna da solo dal ramo `main` di questo repository. Il Kindle
-non parla HTTPS, quindi i file passano dall'Arduino, che li legge da GitHub col
-token:
+Il Kindle si aggiorna da solo, ma solo quando pubblichi un **rilascio**, cioè un
+tag `kindle-vN`. Un push su `main` da solo non lo aggiorna: puoi modificare
+README, sketch o anche `kindle/` senza che il Kindle si riavvii, e decidere tu
+quando una versione è pronta. Il Kindle non parla HTTPS, quindi i file passano
+dall'Arduino, che li legge da GitHub col token:
 
 ```
 Kindle ──HTTP /ota/version, /ota/file──► UNO R4 ──HTTPS + token──► GitHub
 ```
+
+**Pubblicare un aggiornamento.** Fai push su `main`, poi esegui:
+
+```sh
+tools/release_kindle.sh
+```
+
+Lo script:
+1. controlla che `kindle/` non abbia modifiche non committate e che il commit
+   sia già su GitHub;
+2. trova l'ultimo `kindle-vN`. Se da allora `kindle/` non è cambiata, non fa
+   nulla;
+3. fa gli stessi controlli del Kindle, cioè riga finale `# ota:end` e `sh -n`
+   sugli script;
+4. mostra le modifiche, chiede conferma e pubblica `kindle-vN+1`.
+
+Il Kindle passa sempre al tag col numero più alto, confrontato come numero:
+`kindle-v10` viene dopo `kindle-v9`. Non torna mai a un numero più basso,
+nemmeno se cancelli un tag. Per annullare un rilascio sbagliato, pubblica una
+versione corretta con un numero più alto.
 
 **Token.** Su GitHub vai in *Settings → Developer settings → Fine-grained
 tokens* e crea un token con:
@@ -150,7 +173,7 @@ tokens* e crea un token con:
 - permesso *Contents: Read-only*.
 
 Mettilo in `SECRET_GITHUB_TOKEN` in `arduino_secrets.h`. L'Arduino inoltra solo
-i file della cartella `kindle/` a un commit preciso, non il resto del
+i file della cartella `kindle/` ai tag `kindle-vN`, non il resto del
 repository.
 
 **Quando controlla.** Due minuti dopo l'avvio, poi ogni 24 ore
@@ -180,7 +203,7 @@ mettilo anche in `ota-files`.
 2. La versione in uso viene salvata in `.ota_prev/` prima di essere sostituita.
 3. Dopo il riavvio il pannello deve dimostrare di funzionare entro 45 secondi
    (`OTA_HEALTH_SECONDS`). Se non ci riesce, si torna alla versione precedente.
-   Il commit difettoso viene scritto in `.ota_bad` e non viene più riprovato.
+   Il rilascio difettoso viene scritto in `.ota_bad` e non viene più riprovato.
 
 Il controllo e il ripristino li fa il processo della versione vecchia, quindi
 funzionano anche se la versione nuova è difettosa. Resta un caso scoperto: una

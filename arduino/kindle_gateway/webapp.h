@@ -84,7 +84,6 @@ const $ = id => document.getElementById(id);
 const touched = {};  // luce -> ultima modifica locale, per non farsi sovrascrivere dal polling
 let rows = [];
 
-const short = sha => sha ? sha.slice(0, 7) : "";
 const mmss = s => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 
 async function get(path) {
@@ -150,9 +149,9 @@ function render(s) {
   document.querySelectorAll(".controls button").forEach(b => b.disabled = !sp.ok);
 
   const ota = s.ota;
-  $("kver").textContent = "Versione: " + (short(ota.kindle) || "sconosciuta");
+  $("kver").textContent = "Versione: " + (ota.kindle || "sconosciuta");
   $("klatest").textContent = !ota.configured ? "Aggiornamenti non configurati sull'Arduino"
-    : !ota.latest ? "" : ota.latest === ota.kindle ? "Aggiornato" : "Disponibile: " + short(ota.latest);
+    : !ota.latest ? "" : ota.latest === ota.kindle ? "Aggiornato" : "Disponibile: " + ota.latest;
   $("ota").disabled = !ota.configured;
 }
 
