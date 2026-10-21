@@ -28,6 +28,7 @@ KEY_QR=102        # Home: QR del WiFi ospiti e della webapp
 # Legenda nella fascia in basso (i tasti sotto lo schermo)
 LEGEND="◀ ▶ brano  ·  ● play  ·  ↩ tutte le luci  ·  ⌂ WiFi ospiti"
 QR_SECONDS=120    # dopo quanto la schermata dei QR si chiude da sola
+BATTERY_LOW=20    # sotto questa percentuale la batteria è in grassetto
 
 POLL_SECONDS=5          # ogni quanto chiedere lo stato all'Arduino
 SHELLY_SYNC_SECONDS=15  # ogni quanto rileggere le luci (cambiate da webapp o app Shelly)

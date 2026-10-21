@@ -294,13 +294,31 @@ load_status() {
   done < "$RUN/status"
 }
 
+# Batteria del Kindle: "96%", con ⚡ in carica. Vuota se non si legge.
+battery_text() {
+  local level charging
+  if have lipc-get-prop; then
+    level=$(lipc-get-prop com.lab126.powerd battLevel 2>/dev/null)
+    charging=$(lipc-get-prop com.lab126.powerd isCharging 2>/dev/null)
+  else
+    level=$PREVIEW_BATTERY
+  fi
+  [ -n "$level" ] || return 0
+  [ "$charging" = 1 ] && printf '⚡'
+  printf '%s%%' "$level"
+}
+
 draw_header() { # OFFLINE
-  local date=$S_date
+  local date=$S_date batt font=$FONT
+  batt=$(battery_text)
   [ "$1" = 1 ] && date="Gateway non raggiungibile"
-  changed header "$S_time|$date" || return 0
+  changed header "$S_time|$date|$batt" || return 0
   zone_clear $HDR_Y $HDR_H
   text_c $((HDR_Y + 8)) 90 "$FONT_BOLD" "$S_time"
   text_c $((HDR_Y + 105)) 28 "$FONT" "$date"
+  # In alto a destra, in grassetto quando va ricaricata
+  [ "${batt%\%}" -lt "$BATTERY_LOW" ] 2>/dev/null && font=$FONT_BOLD
+  [ -n "$batt" ] && text $((HDR_Y + 12)) 20 "$font" $((SCREEN_W - MARGIN - 64)) $MARGIN "$batt"
   zone_refresh $HDR_Y $HDR_H
 }
 
@@ -531,6 +549,7 @@ keytest() {
 # preview FILE_STATO "acc:lum acc:lum ..." [qr]: disegna una sola schermata
 preview() {
   local i=1 l
+  PREVIEW_BATTERY=${PREVIEW_BATTERY:-87}
   load_lights
   mkdir -p "$RUN"
   rm -f "$RUN"/*
