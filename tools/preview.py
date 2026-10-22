@@ -11,9 +11,7 @@ you change the layout in dashboard.sh or defaults.sh, the preview follows.
     python3 tools/preview.py --screen qr          # QR screen (Home key)
 
 Needs Pillow (pip install pillow); for the QR screen before running
-make_qr.py it also needs segno, to create sample QR codes, and without
-kindle/fonts/icons.ttf fonttools and Internet, to create the icons with
-make_icons.py. It's an approximation: FBInk's font metrics and the 16 gray
+make_qr.py it also needs segno, to create sample QR codes. It's an approximation: FBInk's font metrics and the 16 gray
 levels of e-ink can differ by a few pixels.
 """
 
@@ -50,10 +48,10 @@ def record_commands(status, lights, screen):
             qr_dir = Path(tmp) / "qr"
             make_qr.make(qr_dir, "Casa-Ospiti", "benvenuti2026", "WPA", "http://192.168.1.60/")
         icons = KINDLE_DIR / "fonts/icons.ttf"
-        if not icons.exists():
-            import make_icons
+        if not icons.exists():   # the font that travels with OTA, as on the Kindle
             icons = Path(tmp) / "icons.ttf"
-            make_icons.make(icons)
+            with open(icons, "wb") as f:
+                subprocess.run(["sh", str(KINDLE_DIR / "icons-font.sh")], stdout=f, check=True)
         log = Path(tmp) / "fbink.log"
         shim = Path(tmp) / "fbink"
         shim.write_text(

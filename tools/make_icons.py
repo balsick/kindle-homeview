@@ -9,7 +9,12 @@ it on every call).
 
 The list of icons is the "I_name=char  # mdi-name" table in
 kindle/dashboard.sh, so there's a single source of truth: after changing it,
-run this again and copy the font to /mnt/us/dashboard/fonts/ on the Kindle.
+run this again and commit kindle/icons-font.sh.
+
+Besides the font, it writes kindle/icons-font.sh: the same font as printf
+commands, which travels with OTA updates (they only carry text). On start
+dashboard.sh rewrites fonts/icons.ttf from it when it changes, so the font
+never needs to be copied to the Kindle by hand.
 
     python3 tools/make_icons.py                 # downloads MDI from jsDelivr
     python3 tools/make_icons.py --mdi DIR       # uses an already downloaded @mdi/font
@@ -18,6 +23,7 @@ Needs fonttools (pip install fonttools).
 """
 
 import argparse
+import hashlib
 import logging
 import re
 import sys
@@ -31,6 +37,7 @@ from fontTools.ttLib.tables._c_m_a_p import CmapSubtable
 ROOT = Path(__file__).resolve().parent.parent
 MDI_VERSION = "7.4.47"
 MDI_URL = f"https://cdn.jsdelivr.net/npm/@mdi/font@{MDI_VERSION}/"
+SHELL_FONT = ROOT / "kindle/icons-font.sh"
 TABLE = re.compile(r"^I_(\w+)=(\S)\s+#\s*([a-z0-9-]+)\s*$")
 
 
@@ -85,6 +92,24 @@ def make(out, script=ROOT / "kindle/dashboard.sh", mdi_dir=None):
     return len(mapping)
 
 
+def write_shell(ttf, sh):
+    """The font as printf commands, every byte in octal (no "%" or quoting
+    issues, and NUL bytes work with any printf)."""
+    data = Path(ttf).read_bytes()
+    lines = [
+        "#!/bin/sh",
+        "# The panel's icon font (fonts/icons.ttf) as printf commands, so it can",
+        "# travel with OTA updates, which only carry text: dashboard.sh writes the",
+        "# font when the id below changes. Made by tools/make_icons.py, don't edit.",
+        "# Icons: Material Design Icons by Pictogrammers, Apache License 2.0.",
+        f"# id: {hashlib.sha1(data).hexdigest()[:12]} {len(data)}",
+    ]
+    for i in range(0, len(data), 200):
+        lines.append("printf '" + "".join(f"\\{b:03o}" for b in data[i:i + 200]) + "'")
+    lines.append("# ota:end")
+    Path(sh).write_text("\n".join(lines) + "\n")
+
+
 def main():
     logging.getLogger("fontTools").setLevel(logging.ERROR)   # MDI's harmless warnings
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -92,8 +117,9 @@ def main():
     p.add_argument("--out", type=Path, default=ROOT / "kindle/fonts/icons.ttf")
     args = p.parse_args()
     n = make(args.out, mdi_dir=args.mdi)
+    write_shell(args.out, SHELL_FONT)
     print(f"{n} icons saved to {args.out} ({args.out.stat().st_size // 1024} KB)")
-    print("Copy it to /mnt/us/dashboard/fonts/ on the Kindle.")
+    print(f"and to {SHELL_FONT.relative_to(ROOT)}: commit it, OTA updates bring it to the Kindle.")
 
 
 if __name__ == "__main__":

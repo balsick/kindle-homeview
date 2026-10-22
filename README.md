@@ -32,7 +32,7 @@ Spotify, Open-Meteo ◄─HTTPS── UNO R4 WiFi ──► Arduino Cloud (notif
 | `kindle/` | Panel scripts, to copy into `/mnt/us/dashboard/` on the Kindle |
 | `tools/get_spotify_token.py` | Gets the Spotify refresh token (once, on your computer) |
 | `tools/make_qr.py` | Generates the QR codes for the guest WiFi and the webapp |
-| `tools/make_icons.py` | Generates the icon font used on the Kindle screen |
+| `tools/make_icons.py` | Generates the icon font used on the Kindle screen (`kindle/icons-font.sh`) |
 | `tools/release_kindle.sh` | Publishes an OTA update for the Kindle (`kindle-vN` tag) |
 | `tools/preview.py` | Previews the Kindle screen on your computer |
 | `tools/webapp_dev.py` | Previews the webapp in the browser, with fake APIs |
@@ -174,14 +174,14 @@ If you change the sketch, watch the `Memory:` line it prints on serial every
    framebuffer from the `.raw` files made by `make_qr.py`.
 4. **Fonts.** Copy `DejaVuSans.ttf` and `DejaVuSans-Bold.ttf` to
    `/mnt/us/dashboard/fonts/`. Other fonts work too, just point to them in
-   `config.sh` (`FONT`, `FONT_BOLD`). For the icons, run
-   `python3 tools/make_icons.py` on your computer (needs `pip install
-   fonttools`) and copy the `kindle/fonts/icons.ttf` it creates there too.
-   It holds only the ~60 icons the panel uses, taken from
-   [Material Design Icons](https://pictogrammers.com/library/mdi/) (Apache
-   2.0) and moved onto plain letters, so the shell scripts and FBInk only deal
-   with ASCII. Without it the panel works the same, just without icons. OTA
-   updates don't touch fonts: if a release adds icons, regenerate it.
+   `config.sh` (`FONT`, `FONT_BOLD`). The icon font needs nothing: it's in
+   `icons-font.sh` (one of the OTA files), from which the panel writes
+   `fonts/icons.ttf` on start. It holds only the ~60 icons the panel uses,
+   taken from [Material Design Icons](https://pictogrammers.com/library/mdi/)
+   (Apache 2.0) and moved onto plain letters, so the shell scripts and FBInk
+   only deal with ASCII. To change the icons, edit the `I_` table in
+   `dashboard.sh`, run `python3 tools/make_icons.py` (needs `pip install
+   fonttools`) and commit `kindle/icons-font.sh`.
 5. Copy the files listed in `kindle/ota-files` to `/mnt/us/dashboard/`:
    `lib.sh`, `defaults.sh`, `dashboard.sh`, `ota.sh` and `ota-files`. Then copy
    `kindle/config.example.sh` as `config.sh` and set the IPs and light names.
@@ -308,8 +308,8 @@ the repository.
 The running version also shows at the bottom of the QR screen. The log is in
 `/tmp/dashboard-ota.log`.
 
-**What gets updated.** Only the files listed in `kindle/ota-files`. These are
-never touched:
+**What gets updated.** Only the files listed in `kindle/ota-files`, and the
+icon font that `icons-font.sh` carries. These are never touched:
 - `config.sh`;
 - the QR codes;
 - FBInk;
