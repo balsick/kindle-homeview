@@ -221,8 +221,8 @@ così non lo segnala come spento (`kindleOnline`). Per disattivarla metti
 
 **Misurare.** Ogni 30 minuti il pannello annota la batteria in
 `/mnt/us/dashboard/battery.log` (`BATTERY_LOG_MINUTES`): secondi, ora, livello,
-e "pausa"/"sveglio" quando cambia stato. Da lì si ricava quanti punti all'ora
-consuma da sveglio e in pausa.
+corrente in mA (negativa a batteria) e "pausa"/"sveglio" quando cambia stato.
+Da lì si ricava quanto consuma da sveglio e in pausa.
 
 ## Aggiornamenti OTA del Kindle
 

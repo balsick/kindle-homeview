@@ -434,18 +434,33 @@ load_status() {
   done < "$RUN/status"
 }
 
-# Batteria del Kindle: "96%", con ⚡ in carica. Vuota se non si legge.
+# Batteria del Kindle: "96%", con ⚡ col cavo collegato. Vuota se non si legge.
+# La batteria si legge da sysfs con read, senza processi. "⚡" vuol dire cavo
+# collegato (USB connesso): isCharging di powerd vale 0 quando la batteria è
+# quasi piena anche col cavo attaccato.
+BATT_SYS=/sys/devices/system/yoshi_battery/yoshi_battery0
+USB_SYS=/sys/devices/platform/fsl-usb2-udc
 battery_text() {
-  local level charging
-  if have lipc-get-prop; then
+  local level="" plugged=""
+  if [ -r "$BATT_SYS/battery_capacity" ]; then
+    read -r level < "$BATT_SYS/battery_capacity"; level=${level%\%}
+    [ -r "$USB_SYS/connected" ] && read -r plugged < "$USB_SYS/connected"
+  elif have lipc-get-prop; then
     level=$(lipc-get-prop com.lab126.powerd battLevel 2>/dev/null)
-    charging=$(lipc-get-prop com.lab126.powerd isCharging 2>/dev/null)
+    plugged=$(lipc-get-prop com.lab126.powerd isCharging 2>/dev/null)
   else
     level=$PREVIEW_BATTERY
   fi
   [ -n "$level" ] || return 0
-  [ "$charging" = 1 ] && printf '⚡'
+  [ "$plugged" = 1 ] && printf '⚡'
   printf '%s%%' "$level"
+}
+
+# Battery current in mA (positive while charging), empty if unavailable
+battery_current() {
+  local ma=""
+  [ -r "$BATT_SYS/battery_current" ] && read -r ma < "$BATT_SYS/battery_current"
+  [ -n "$ma" ] && printf '%smA' "$ma"
 }
 
 # Orologio interno: l'ora dell'Arduino (S_time) tarata sull'orologio del
@@ -624,11 +639,11 @@ pause_end() {
 }
 
 # ---------- registro della batteria ----------
-# battery.log: "secondi_epoch ora batteria [evento]", per misurare i consumi.
+# battery.log: "secondi_epoch ora batteria corrente [evento]", per misurare i consumi.
 
 battery_log() { # [EVENTO]
   [ "${BATTERY_LOG_MINUTES:-0}" -gt 0 ] && [ -z "$PREVIEW_FBINK" ] || return 0
-  echo "$(date +%s) $(clock_now) $(battery_text) $1" >> "$DIR/battery.log"
+  echo "$(date +%s) $(clock_now) $(battery_text) $(battery_current) $1" >> "$DIR/battery.log"
 }
 
 battery_log_trim() {
