@@ -70,7 +70,8 @@ on the edges of the screen, next to the page keys, show what they do.
 
 Each light is a tile: the gray fills it from the bottom as far as the
 brightness. Its icon is set in `LIGHT_ICONS` (`sofa`, `kitchen`, `desk`,
-`bulb`, `ceiling`, `floor`, `bed`, `tv`, `strip`).
+`bulb`, `ceiling`, `floor`, `lamp`, `spot`, `sconce`, `strip`, `books`,
+`bed`, `tv`).
 
 Holding down brightness or volume keeps changing the value. Only the last
 value is sent to the Shelly and to Spotify, once the keys stop (debounce).

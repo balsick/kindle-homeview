@@ -8,7 +8,8 @@ SHELLY_HOST="192.168.1.50"    # IP of the Shelly Plus RGBW PM ("light" profile, 
 # The lights, in the same order in all the lines below.
 LIGHT_IDS="0 1 2"                                 # Shelly channel (0-3)
 LIGHT_NAMES="Soggiorno|Cucina|Studio"
-# Icons, from the I_ table in dashboard.sh: bulb sofa kitchen desk ceiling floor bed tv strip
+# Icons, from the I_ table in dashboard.sh: bulb sofa kitchen desk ceiling floor
+# lamp spot sconce strip books bed tv
 LIGHT_ICONS="sofa kitchen desk"
 STEP=10                                           # brightness step in %
 VOLUME_STEP=10                                    # Spotify volume step in %
