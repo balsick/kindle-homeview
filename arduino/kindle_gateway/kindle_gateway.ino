@@ -1,63 +1,67 @@
 /*
-  Gateway per il pannello Kindle — Arduino UNO R4 WiFi
+  Gateway for the Kindle panel — Arduino UNO R4 WiFi
 
-  Il Kindle 5 non supporta l'HTTPS moderno: questo sketch parla con Spotify e
-  Open-Meteo in HTTPS e offre al Kindle due endpoint HTTP in chiaro:
+  The Kindle 5 can't do modern HTTPS: this sketch talks HTTPS to Spotify and
+  Open-Meteo and gives the Kindle two plain-HTTP endpoints:
 
-    GET /status          stato in formato "chiave=valore", una riga per chiave
-                         con le luci; ?sleep=S: il Kindle spegne il WiFi per S secondi
-    GET /cmd?a=AZIONE    comando Spotify: toggle | play | pause | next | prev
+    GET /status           state as "key=value", one line per key, lights included;
+                          ?sleep=S: the Kindle pauses its WiFi for S seconds
+    GET /cmd?a=ACTION     Spotify command: toggle | play | pause | next | prev
 
-  Serve anche la webapp per il telefono (solo LAN, senza password):
+  It also serves the phone webapp (LAN only, no password):
 
-    GET /                          la pagina (webapp.h)
-    GET /api/state                 stato in JSON, luci comprese
-    GET /api/light?i=N&on=1&b=50   accende/spegne/regola la luce N (indice in LIGHTS)
-    GET /api/cmd?a=AZIONE          come /cmd
-    GET /api/ota                   chiede al Kindle di cercare aggiornamenti
+    GET /                          the page (webapp.h)
+    GET /api/state                 state as JSON, lights included
+    GET /api/light?i=N&on=1&b=50   switches/dims light N (index into LIGHTS)
+    GET /api/cmd?a=ACTION          same as /cmd
+    GET /api/ota                   asks the Kindle to check for updates
 
-  E fa da tramite per gli aggiornamenti OTA del Kindle (repository privato,
-  token in arduino_secrets.h):
+  And it relays the Kindle's OTA updates from GitHub (OTA_GITHUB_REPO in
+  home_config.h; token in arduino_secrets.h, needed only for a private repo):
 
-    GET /ota/version                      ultimo tag di rilascio kindle-vN
-    GET /ota/file?ref=TAG&path=kindle/F   un file della cartella kindle/ a quel tag
+    GET /ota/version                      latest kindle-vN release tag
+    GET /ota/file?ref=TAG&path=kindle/F   a file of the kindle/ folder at that tag
 
-  È anche un device Arduino Cloud: quando va via la corrente il device risulta
-  offline e il trigger configurato sul Cloud manda la notifica. Il WiFi lo
-  gestisce la libreria Cloud (credenziali dal Network Configurator), quindi
-  questo sketch usa la rete solo quando è connessa e chiama ArduinoCloud.update()
-  tra un'operazione lenta e l'altra.
+  It is also an Arduino Cloud device: on a power cut the device goes offline
+  and the trigger set up in the Cloud sends a notification. WiFi is handled by
+  the Cloud library (credentials from the Network Configurator), so this
+  sketch only uses the network while connected and calls ArduinoCloud.update()
+  between slow operations.
 
-  Librerie: ArduinoIoTCloud (con le sue dipendenze) e ArduinoJson 7.
+  Libraries: ArduinoIoTCloud (with its dependencies) and ArduinoJson 7.
 */
 
 #include "thingProperties.h"
 #include <WiFiS3.h>
-#include "Modem.h"         // modem e comandi AT, per ChunkedSSLClient
+#include "Modem.h"         // modem and AT commands, for ChunkedSSLClient
 #include "WiFiCommands.h"
 #include <WDT.h>
 #include "FspTimer.h"
 #include <malloc.h>
 #include <ArduinoJson.h>
 #include "arduino_secrets.h"
-#ifndef SECRET_GITHUB_TOKEN  // arduino_secrets.h creato prima dell'OTA: OTA disattivato
+#ifndef SECRET_GITHUB_TOKEN  // arduino_secrets.h from before OTA existed: no token
 #define SECRET_GITHUB_TOKEN ""
 #endif
 #include "https_response.h"
 #include "webapp.h"
 
-// ---- Configurazione ----
-// Posizione, Shelly e luci di casa stanno in home_config.h (copia di
-// home_config.h.example), escluso da git come arduino_secrets.h.
+// ---- Configuration ----
+// Location, Shelly and lights live in home_config.h (a copy of
+// home_config.h.example), kept out of git like arduino_secrets.h.
 struct Light {
   const char* name;
-  int id;  // canale Shelly (0-3)
+  int id;  // Shelly channel (0-3)
 };
 #include "home_config.h"
 const int NUM_LIGHTS = sizeof(LIGHTS) / sizeof(LIGHTS[0]);
 
-// Repository da cui il Kindle prende gli aggiornamenti: i tag kindle-vN
-const char* const GITHUB_REPO = "balsick/kindle-homeview";
+// Repository the Kindle takes its updates from: the kindle-vN tags.
+// Forks set OTA_GITHUB_REPO in home_config.h; "" turns OTA off.
+#ifndef OTA_GITHUB_REPO
+#define OTA_GITHUB_REPO "balsick/kindle-homeview"
+#endif
+const char* const GITHUB_REPO = OTA_GITHUB_REPO;
 const char* const OTA_TAG_PREFIX = "kindle-v";
 
 const unsigned long SPOTIFY_POLL_PLAYING_MS = 5000;
@@ -67,6 +71,7 @@ const unsigned long WEATHER_RETRY_MS = 60UL * 1000;
 const unsigned long NTP_SYNC_MS = 60UL * 60 * 1000;
 const unsigned long NTP_RETRY_MS = 10UL * 1000;
 
+// Text shown on the Kindle and in the webapp is in Italian
 const char* const WEEKDAYS[] = {"domenica", "lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato"};
 const char* const WEEKDAYS_SHORT[] = {"Dom", "Lun", "Mar", "Mer", "Gio", "Ven", "Sab"};
 const char* const MONTHS[] = {"gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
@@ -75,16 +80,16 @@ const char* const MONTHS[] = {"gennaio", "febbraio", "marzo", "aprile", "maggio"
 WiFiServer server(80);
 const unsigned long ACCEPT_INTERVAL_MS = 50;
 
-// Stack dello sketch (vedi runOnAppStack). Sotto appStack, in memoria, c'è
-// accessToken: con 2 KB lo stack sconfinava sulla String del token e le
-// richieste a Spotify partivano rovinate (400).
-const size_t APP_STACK_BYTES = 2560;  // picco misurato ~1,7 KB
-// Client TLS che legge dal modulo WiFi al massimo SSL_CHUNK byte per volta.
-// WiFiSSLClient ne chiede fino a 1023 e li riceve in una std::string che cresce
-// un byte alla volta: le riallocazioni chiedono un blocco contiguo di ~3 KB.
-// Con l'heap frammentato a volte non c'è, e allora abort() blocca la scheda.
-// Qui lo spazio è riservato prima (assign e clear non lo rilasciano) e il
-// blocco serve una volta sola, di SSL_CHUNK byte.
+// The sketch's own stack (see runOnAppStack). Right below appStack in memory
+// sits accessToken: with 2 KB the stack overflowed into the token String and
+// Spotify requests went out garbled (400).
+const size_t APP_STACK_BYTES = 2560;  // measured peak ~1.7 KB
+// TLS client that reads at most SSL_CHUNK bytes at a time from the WiFi module.
+// WiFiSSLClient asks for up to 1023 and receives them in a std::string that
+// grows one byte at a time: the reallocations need a ~3 KB contiguous block.
+// With a fragmented heap that block is sometimes missing, and abort() hangs
+// the board. Here the space is reserved up front (assign and clear don't
+// release it) and a single SSL_CHUNK-byte block is needed, once.
 const size_t SSL_CHUNK = 512;
 
 class ChunkedSSLClient : public WiFiSSLClient {
@@ -115,7 +120,7 @@ class ChunkedSSLClient : public WiFiSSLClient {
     std::string res;
     res.reserve(size + 16);
     modem.begin();
-    modem.avoid_trim_results();  // come in WiFiSSLClient::_read(): valgono una volta sola
+    modem.avoid_trim_results();  // as in WiFiSSLClient::_read(): they apply once
     modem.read_using_size();
     if (modem.write(std::string(PROMPT(_SSLCLIENTRECEIVE)), res, "%s%d,%d\r\n",
                     CMD_WRITE(_SSLCLIENTRECEIVE), _sock, size)) {
@@ -125,18 +130,19 @@ class ChunkedSSLClient : public WiFiSSLClient {
 };
 
 ChunkedSSLClient tls;
-// Niente WiFiClient globale per lo Shelly: in WiFiS3 ogni WiFiClient alloca 1 KB
-// di buffer appena costruito, e la RAM non basta. Lo creiamo solo quando serve.
+// No global WiFiClient for the Shelly: in WiFiS3 every WiFiClient allocates a
+// 1 KB buffer as soon as it's constructed, and RAM is short. We create one
+// only when needed.
 
-// ---- Stato ----
+// ---- State ----
 struct {
   bool configured = false;
-  bool ok = false;        // ultima chiamata andata a buon fine
-  bool active = false;    // c'è qualcosa caricato nel player
+  bool ok = false;        // last call succeeded
+  bool active = false;    // something is loaded in the player
   bool playing = false;
   String track, artist;
-  String device;          // dove suona (solo dispositivi di casa)
-  int volume = -1;        // -1: il dispositivo non regola il volume
+  String device;          // where it plays (home devices only)
+  int volume = -1;        // -1: the device has no volume control
   long progressMs = 0, durationMs = 0;
   unsigned long fetchedAt = 0;
 } sp;
@@ -153,20 +159,20 @@ String accessToken, refreshToken, basicAuth;
 unsigned long tokenAt = 0, tokenValidMs = 0;
 unsigned long epochAtSync = 0, millisAtSync = 0;
 unsigned long nextSpotifyAt = 0, nextWeatherAt = 0, nextNtpAt = 0;
-String kindleVersion, latestVersion;  // per mostrarli nella webapp
-unsigned long kindleSeenAt = 0;  // ultima richiesta del Kindle a /status
-unsigned long kindleAwayMs = 0;  // il Kindle ha detto che va in pausa (WiFi spento) per tanto
-unsigned otaRequests = 0;         // il Kindle controlla quando il valore cambia
+String kindleVersion, latestVersion;  // shown in the webapp
+unsigned long kindleSeenAt = 0;  // last /status request from the Kindle
+unsigned long kindleAwayMs = 0;  // the Kindle said it pauses (WiFi off) for this long
+unsigned otaRequests = 0;         // the Kindle checks for updates when this changes
 
 bool due(unsigned long at) { return (long)(millis() - at) >= 0; }
 
-// Scrive l'errore sulla seriale e nella variabile lastError del Thing
-// Ultimi errori, con i secondi dall'avvio, per GET /log (buffer statico)
+// Latest errors, with seconds since boot, for GET /log (static buffer)
 const int LOG_LINES = 6;
 const int LOG_WIDTH = 80;
 char errLog[LOG_LINES][LOG_WIDTH];
 int errLogNext = 0;
 
+// Writes the error to serial, to the Thing's lastError variable and to errLog
 void logError(const String& msg) {
   Serial.println(msg);
   lastError = msg;
@@ -174,18 +180,18 @@ void logError(const String& msg) {
   errLogNext = (errLogNext + 1) % LOG_LINES;
 }
 
-// ---- Client HTTP/HTTPS ----
+// ---- HTTP/HTTPS client ----
 
-// La richiesta si scrive a pezzi, senza String: con l'heap frammentato le
-// concatenazioni di String falliscono in silenzio e la richiesta partiva
-// malformata (il front end di Google risponde "400 Bad Request"). I pezzi
-// passano da writeBuf e partono a blocchi di WRITE_CHUNK byte: una raffica
-// unica di ~600 byte arrivava a volte rovinata al modulo WiFi.
+// Requests are written in pieces, without String: with a fragmented heap,
+// String concatenations fail silently and the request went out malformed
+// (Google's front end answers "400 Bad Request"). The pieces go through
+// writeBuf and are sent in WRITE_CHUNK-byte blocks: a single ~600-byte burst
+// sometimes reached the WiFi module garbled.
 const size_t WRITE_CHUNK = 128;
 char writeBuf[WRITE_CHUNK];
 char pathBuf[160];
 
-// Percorso con printf, nel buffer statico pathBuf (vale fino alla prossima chiamata)
+// printf-style path, in the static pathBuf (valid until the next call)
 const char* fmtPath(const char* fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
@@ -194,9 +200,9 @@ const char* fmtPath(const char* fmt, ...) {
   return pathBuf;
 }
 
-// Esegue una richiesta e lascia `c` posizionato all'inizio del corpo.
-// headers e body sono elenchi di pezzi da concatenare, chiusi da nullptr
-// (le righe di intestazione finiscono con "\r\n"). code = -1 se fallisce.
+// Sends a request and leaves `c` positioned at the start of the body.
+// headers and body are lists of pieces to concatenate, terminated by nullptr
+// (header lines end with "\r\n"). code = -1 on failure.
 Response httpRequest(Client& c, const char* host, uint16_t port, unsigned long timeoutMs,
                      const char* method, const char* path, const char* const* headers,
                      const char* const* body) {
@@ -251,8 +257,8 @@ const size_t DEVICES_MAX_BYTES = 3072;
 class BodyStream;
 String readBody(Client& c, const Response& r, size_t maxBytes);
 
-// Legge il corpo della risposta decodificando al volo il "chunked", così
-// ArduinoJson fa il parsing in streaming senza caricare tutto in RAM.
+// Reads the response body, decoding "chunked" on the fly, so ArduinoJson can
+// parse it as a stream without loading it all into RAM.
 class BodyStream : public Stream {
  public:
   BodyStream(Client& c, const Response& r)
@@ -271,7 +277,7 @@ class BodyStream : public Stream {
     if (peeked_ >= 0) return peeked_;
     if (done_) return -1;
     if (chunked_ && left_ == 0 && !nextChunk()) return -1;
-    if (left_ == 0) {  // Content-Length esaurito
+    if (left_ == 0) {  // Content-Length used up
       done_ = true;
       return -1;
     }
@@ -289,7 +295,7 @@ class BodyStream : public Stream {
 
  private:
   bool nextChunk() {
-    if (started_) c_.readStringUntil('\n');  // CRLF dopo il chunk precedente
+    if (started_) c_.readStringUntil('\n');  // CRLF after the previous chunk
     started_ = true;
     String size = c_.readStringUntil('\n');
     left_ = strtol(size.c_str(), nullptr, 16);
@@ -302,12 +308,12 @@ class BodyStream : public Stream {
 
   Client& c_;
   bool chunked_;
-  long left_;  // byte rimasti nel chunk o nel corpo; -1 = fino alla chiusura
+  long left_;  // bytes left in the chunk or body; -1 = until the connection closes
   bool started_ = false, done_ = false;
   int peeked_ = -1;
 };
 
-// Legge tutto il corpo (al massimo maxBytes) in una String
+// Reads the whole body (at most maxBytes) into a String
 String readBody(Client& c, const Response& r, size_t maxBytes) {
   BodyStream body(c, r);
   String out;
@@ -339,7 +345,7 @@ bool refreshSpotifyToken() {
                            "\r\nContent-Type: application/x-www-form-urlencoded\r\n", nullptr};
   const char* body[] = {"grant_type=refresh_token&refresh_token=", refreshToken.c_str(), nullptr};
   Response r = httpsRequest("accounts.spotify.com", "POST", "/api/token", headers, body);
-  // Risposta piccola: la leggiamo tutta prima del parsing, come per il meteo
+  // Small response: read it all before parsing, as for the weather
   String json = r.code > 0 ? readBody(tls, r, TOKEN_MAX_BYTES) : String();
   tls.stop();
   bool ok = false;
@@ -347,25 +353,25 @@ bool refreshSpotifyToken() {
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     if (err) {
-      logError(String("Spotify: risposta del token illeggibile (") + err.c_str() + ")");
+      logError(String("Spotify: unreadable token response (") + err.c_str() + ")");
     } else {
       accessToken = doc["access_token"] | "";
       tokenAt = millis();
       tokenValidMs = ((doc["expires_in"] | 3600) - 60) * 1000UL;
-      // Spotify di solito non ruota il refresh token, ma se lo fa lo teniamo
-      // (solo in RAM: dopo un riavvio si riparte da quello in arduino_secrets.h).
+      // Spotify usually doesn't rotate the refresh token, but if it does we keep
+      // it (in RAM only: after a reboot we start again from arduino_secrets.h).
       if (doc["refresh_token"].is<const char*>()) refreshToken = doc["refresh_token"].as<const char*>();
       ok = accessToken.length() > 0;
-      if (!ok) logError("Spotify: risposta del token senza access_token");
+      if (!ok) logError("Spotify: token response without access_token");
     }
   } else {
-    logError("Spotify: rinnovo token fallito, HTTP " + String(r.code) + " " + json.substring(0, 80));
+    logError("Spotify: token refresh failed, HTTP " + String(r.code) + " " + json.substring(0, 80));
   }
   return ok;
 }
 
-// Chiama la Web API. Dopo la chiamata il corpo è da leggere da `tls`.
-// path può stare in pathBuf (fmtPath): il rinnovo del token non lo tocca
+// Calls the Web API. Afterwards the body is to be read from `tls`.
+// path may live in pathBuf (fmtPath): refreshing the token doesn't touch it
 Response spotifyApi(const char* method, const char* path, const char* const* body = nullptr) {
   if (accessToken.length() == 0 || millis() - tokenAt > tokenValidMs) {
     if (!refreshSpotifyToken()) return Response();
@@ -373,17 +379,17 @@ Response spotifyApi(const char* method, const char* path, const char* const* bod
   const char* headers[] = {"Authorization: Bearer ", accessToken.c_str(), "\r\n",
                            body ? "Content-Type: application/json\r\n" : "", nullptr};
   Response r = httpsRequest("api.spotify.com", method, path, headers, body);
-  if (r.code == 401) accessToken = "";  // token scaduto: si rinnova alla prossima chiamata
+  if (r.code == 401) accessToken = "";  // token expired: refreshed on the next call
   return r;
 }
 
 void updateNowPlaying() {
-  // /v1/me/player dice anche su quale dispositivo suona: contano solo quelli
-  // di casa (gli Echo, tipo "Speaker"), non il telefono in ufficio.
+  // /v1/me/player also says which device is playing: only home devices count
+  // (Echos, type "Speaker"), not the phone at the office.
   Response r = spotifyApi("GET", "/v1/me/player?market=from_token&additional_types=episode");
   unsigned long next = SPOTIFY_POLL_IDLE_MS;
 
-  if (r.code == 204) {  // niente in riproduzione
+  if (r.code == 204) {  // nothing playing
     sp.ok = true;
     sp.active = sp.playing = false;
     sp.device = "";
@@ -416,7 +422,7 @@ void updateNowPlaying() {
       sp.progressMs = doc["progress_ms"] | 0;
       sp.durationMs = item["duration_ms"] | 0;
       sp.track = item["name"] | "";
-      // Brani: elenco artisti. Episodi di podcast: nome del podcast.
+      // Tracks: list of artists. Podcast episodes: name of the show.
       sp.artist = "";
       for (JsonObject a : item["artists"].as<JsonArray>()) {
         if (sp.artist.length()) sp.artist += ", ";
@@ -428,14 +434,14 @@ void updateNowPlaying() {
     }
   } else {
     sp.ok = false;
-    logError("Spotify: now playing fallito, HTTP " + String(r.code));
+    logError("Spotify: now playing failed, HTTP " + String(r.code));
     if (r.code == 429) next = 60000;  // rate limit
   }
   tls.stop();
   nextSpotifyAt = millis() + next;
 }
 
-// Id del dispositivo di casa su cui far partire la musica (SPOTIFY_HOME_DEVICE)
+// Id of the home device to start music on (SPOTIFY_HOME_DEVICE)
 String spotifyHomeDeviceId() {
   Response r = spotifyApi("GET", "/v1/me/player/devices");
   String json = r.code == 200 ? readBody(tls, r, DEVICES_MAX_BYTES) : String();
@@ -447,13 +453,13 @@ String spotifyHomeDeviceId() {
   return "";
 }
 
-// Fa partire la musica a casa: riprende da dove era rimasta sul dispositivo di
-// casa (spostandola lì se suona altrove). Se non c'è niente da riprendere e
-// c'è una playlist di riserva, parte quella.
+// Starts music at home: resumes where it left off on the home device (moving
+// it there if it's playing elsewhere). If there's nothing to resume and a
+// fallback playlist is set, that one starts.
 int spotifyStartAtHome() {
   String id = spotifyHomeDeviceId();
   if (id.length() == 0) {
-    logError(String("Spotify: ") + SPOTIFY_HOME_DEVICE + " non trovato tra i dispositivi");
+    logError(String("Spotify: ") + SPOTIFY_HOME_DEVICE + " not found among the devices");
     return 404;
   }
   Response r = spotifyApi("PUT", fmtPath("/v1/me/player/play?device_id=%s", id.c_str()));
@@ -463,13 +469,13 @@ int spotifyStartAtHome() {
     r = spotifyApi("PUT", fmtPath("/v1/me/player/play?device_id=%s", id.c_str()), body);
     tls.stop();
   }
-  if (r.code < 200 || r.code >= 300) logError("Spotify: avvio a casa fallito, HTTP " + String(r.code));
+  if (r.code < 200 || r.code >= 300) logError("Spotify: start at home failed, HTTP " + String(r.code));
   return r.code;
 }
 
-// Azioni: toggle (pausa, o avvio a casa se a casa non suona niente), play,
-// pause, next, prev, vol (con value = 0-100). Tutto tranne l'avvio vale solo
-// per la musica che suona a casa.
+// Actions: toggle (pause, or start at home if nothing plays at home), play,
+// pause, next, prev, vol (with value = 0-100). Everything but starting only
+// applies to music playing at home.
 int spotifyCommand(String action, const String& value) {
   if (!sp.configured) return 503;
   if (action == "toggle") action = sp.playing ? "pause" : "play";
@@ -483,7 +489,7 @@ int spotifyCommand(String action, const String& value) {
     }
     r = spotifyApi("PUT", "/v1/me/player/play");
   } else if (!sp.active) {
-    return 409;  // a casa non suona niente
+    return 409;  // nothing playing at home
   } else if (action == "pause") {
     r = spotifyApi("PUT", "/v1/me/player/pause");
   } else if (action == "next") {
@@ -491,7 +497,7 @@ int spotifyCommand(String action, const String& value) {
   } else if (action == "prev") {
     r = spotifyApi("POST", "/v1/me/player/previous");
   } else if (action == "vol") {
-    if (sp.volume < 0) return 409;  // questo dispositivo non regola il volume
+    if (sp.volume < 0) return 409;  // this device has no volume control
     int v = constrain(value.toInt(), 0, 100);
     r = spotifyApi("PUT", fmtPath("/v1/me/player/volume?volume_percent=%d", v));
     if (r.code >= 200 && r.code < 300) sp.volume = v;
@@ -499,9 +505,9 @@ int spotifyCommand(String action, const String& value) {
     return 400;
   }
   if (r.code < 200 || r.code >= 300) {
-    // Il messaggio di Spotify dice il perché (dispositivo, Premium, richiesta…)
+    // Spotify's message says why (device, Premium, request…)
     String msg = r.code > 0 ? readBody(tls, r, 512) : String();
-    logError("Spotify: " + action + " fallito, HTTP " + String(r.code) + " " + msg.substring(0, 120));
+    logError("Spotify: " + action + " failed, HTTP " + String(r.code) + " " + msg.substring(0, 120));
   }
   tls.stop();
 
@@ -509,14 +515,14 @@ int spotifyCommand(String action, const String& value) {
     if (action == "play") sp.playing = true;
     if (action == "pause") sp.playing = false;
   }
-  nextSpotifyAt = millis() + 600;  // Spotify ci mette un attimo ad aggiornare lo stato
+  nextSpotifyAt = millis() + 600;  // Spotify takes a moment to update its state
   return r.code;
 }
 
-// ---- Shelly (per la webapp) ----
+// ---- Shelly (for the webapp) ----
 
 bool shellyRpc(const char* path, JsonDocument& doc) {
-  WiFiClient plain;  // HTTP in chiaro verso lo Shelly
+  WiFiClient plain;  // plain HTTP to the Shelly
   Response r = httpRequest(plain, SHELLY_HOST, 80, 2000, "GET", path, nullptr, nullptr);
   bool ok = r.code == 200;
   if (ok) {
@@ -542,8 +548,9 @@ bool shellySetLight(int id, bool on, int brightness) {
   return shellyRpc(path, doc);
 }
 
-// ---- Meteo (Open-Meteo, senza chiave API) ----
+// ---- Weather (Open-Meteo, no API key) ----
 
+// WMO weather codes
 const char* weatherDesc(int c) {
   switch (c) {
     case 0: return "Sereno";
@@ -570,8 +577,8 @@ const char* weatherDesc(int c) {
   }
 }
 
-// Il percorso del meteo non cambia: si compone una volta all'avvio
-char weatherPath[280];  // ~256 caratteri con le coordinate di Torino
+// The weather path never changes: it's built once at startup
+char weatherPath[280];  // ~256 characters with typical coordinates
 
 void buildWeatherPath() {
   char lat[16], lon[16];
@@ -586,23 +593,23 @@ void buildWeatherPath() {
 
 void updateWeather() {
 
-  Serial.println("Meteo: aggiornamento");
+  Serial.println("Weather: updating");
   Response r = httpsRequest("api.open-meteo.com", "GET", weatherPath);
   bool ok = false;
   if (r.code == 200) {
-    // La risposta è piccola (~1 KB): la leggiamo tutta e chiudiamo la
-    // connessione prima del parsing. Così il parser non legge dalla rete mentre
-    // è in ricorsione (meno stack) e una connessione lenta non lo blocca.
+    // The response is small (~1 KB): read it all and close the connection
+    // before parsing. That way the parser doesn't read from the network while
+    // recursing (less stack) and a slow connection can't stall it.
     String json = readBody(tls, r, WEATHER_MAX_BYTES);
     tls.stop();
     JsonDocument doc;
     DeserializationError err = deserializeJson(doc, json);
     JsonObject cur = doc["current"];
     JsonObject daily = doc["daily"];
-    // Accettiamo solo risposte complete: altrimenti teniamo i dati precedenti
+    // Only complete responses are accepted: otherwise we keep the previous data
     if (err || doc.overflowed() || cur["temperature_2m"].isNull() || daily["weather_code"].size() < 3 ||
         daily["temperature_2m_min"].size() < 3 || daily["temperature_2m_max"].size() < 3) {
-      logError(String("Meteo: risposta incompleta (") + err.c_str() + ", previsioni " +
+      logError(String("Weather: incomplete response (") + err.c_str() + ", forecast days " +
                daily["weather_code"].size() + ")");
     } else {
       wx.temp = cur["temperature_2m"];
@@ -616,20 +623,20 @@ void updateWeather() {
         wx.dMax[i] = lroundf(daily["temperature_2m_max"][i].as<float>());
         wx.dPop[i] = daily["precipitation_probability_max"][i] | 0;
       }
-      wx.utcOffset = doc["utc_offset_seconds"];  // include l'ora legale
+      wx.utcOffset = doc["utc_offset_seconds"];  // includes daylight saving time
       ok = true;
     }
   } else {
-    logError("Meteo: richiesta fallita, HTTP " + String(r.code));
+    logError("Weather: request failed, HTTP " + String(r.code));
   }
   tls.stop();
-  wx.ok = wx.ok || ok;  // in caso di errore teniamo gli ultimi dati validi
+  wx.ok = wx.ok || ok;  // on error we keep the last valid data
   weatherOk = ok;
-  if (ok) Serial.println("Meteo: ok");
+  if (ok) Serial.println("Weather: ok");
   nextWeatherAt = millis() + (ok ? WEATHER_POLL_MS : WEATHER_RETRY_MS);
 }
 
-// ---- Ora ----
+// ---- Time ----
 
 void syncTime() {
   unsigned long epoch = WiFi.getTime();
@@ -642,7 +649,7 @@ void syncTime() {
   }
 }
 
-// Giorni dal 1970-01-01 -> mese e giorno (algoritmo di Howard Hinnant).
+// Days since 1970-01-01 -> month and day (Howard Hinnant's algorithm).
 void civilFromDays(long z, int& m, int& d) {
   z += 719468;
   long era = z / 146097;
@@ -654,8 +661,8 @@ void civilFromDays(long z, int& m, int& d) {
   m = mp < 10 ? mp + 3 : mp - 9;
 }
 
-// Ora e data locali. false finché non ci sono sia l'NTP sia il fuso orario,
-// che arriva insieme al meteo.
+// Local time and date. false until we have both NTP and the time zone, which
+// comes with the weather.
 bool localClock(long& today, String& time, String& date) {
   if (epochAtSync == 0 || !wx.ok) return false;
   unsigned long local = epochAtSync + (millis() - millisAtSync) / 1000 + wx.utcOffset;
@@ -676,9 +683,9 @@ long spotifyProgressMs() {
   return min(progress, sp.durationMs);
 }
 
-// ---- Server HTTP per Kindle e webapp ----
+// ---- HTTP server for the Kindle and the webapp ----
 
-// Una riga "chiave=valore"; i valori non devono contenere a capo.
+// One "key=value" line; values must not contain newlines.
 void kv(String& s, const char* key, String value) {
   value.replace('\n', ' ');
   value.replace('\r', ' ');
@@ -695,10 +702,10 @@ String decimalComma(float v) {
 }
 
 String buildStatus() {
-  // Le luci dallo Shelly, così il Kindle non deve chiederle lui. Si leggono
-  // prima di comporre la risposta, per non avere insieme il WiFiClient da 1 KB
-  // e il buffer della risposta. Se lo Shelly non risponde ci si ferma: lc_ok=0
-  // e niente chiavi lcN.
+  // Lights from the Shelly, so the Kindle doesn't have to ask it itself.
+  // Read before building the response, so the 1 KB WiFiClient and the
+  // response buffer aren't allocated at the same time. If the Shelly doesn't
+  // answer we stop there: lc_ok=0 and no lcN keys.
   bool on[NUM_LIGHTS];
   int bright[NUM_LIGHTS];
   bool lightsOk = true;
@@ -737,7 +744,7 @@ String buildStatus() {
   kv(s, "sp_volume", String(sp.volume));
   kv(s, "ota_req", String(otaRequests));
 
-  // lcN=acceso|luminosità, N è il canale Shelly (LIGHT_IDS sul Kindle)
+  // lcN=on|brightness, N is the Shelly channel (LIGHT_IDS on the Kindle)
   kv(s, "lc_ok", lightsOk ? "1" : "0");
   if (lightsOk) {
     for (int i = 0; i < NUM_LIGHTS; i++) {
@@ -749,8 +756,8 @@ String buildStatus() {
   return s;
 }
 
-// Stato per la webapp. Le luci si leggono dallo Shelly a ogni richiesta, così
-// si vedono anche le modifiche fatte dal Kindle o dall'app Shelly.
+// State for the webapp. Lights are read from the Shelly on every request, so
+// changes made from the Kindle or the Shelly app show up too.
 String buildApiState() {
   JsonDocument doc;
   long today;
@@ -792,7 +799,7 @@ String buildApiState() {
   s["volume"] = sp.volume;
 
   JsonObject ota = doc["ota"].to<JsonObject>();
-  ota["configured"] = strlen(SECRET_GITHUB_TOKEN) > 0;
+  ota["configured"] = strlen(GITHUB_REPO) > 0;
   ota["kindle"] = kindleVersion;
   ota["latest"] = latestVersion;
 
@@ -821,7 +828,7 @@ void sendWebapp(WiFiClient& c) {
   }
 }
 
-// Valore di un parametro della query string ("" se assente)
+// Value of a query string parameter ("" if missing)
 String queryParam(const String& path, const char* name) {
   String key = String(name) + "=";
   int start = path.indexOf('?') + 1;
@@ -835,12 +842,12 @@ String queryParam(const String& path, const char* name) {
 
 void sendCommandResult(WiFiClient& c, int code) {
   bool ok = code >= 200 && code < 300;
-  sendText(c, ok ? 200 : 502, ok ? "ok\n" : "errore " + String(code) + "\n");
+  sendText(c, ok ? 200 : 502, ok ? "ok\n" : "error " + String(code) + "\n");
 }
 
-// ---- GitHub (aggiornamenti OTA del Kindle) ----
+// ---- GitHub (OTA updates for the Kindle) ----
 
-// "kindle-v12" -> 12; -1 se non è un tag di rilascio del Kindle
+// "kindle-v12" -> 12; -1 if it isn't a Kindle release tag
 long releaseNumber(const String& tag) {
   unsigned n = strlen(OTA_TAG_PREFIX);
   if (!tag.startsWith(OTA_TAG_PREFIX) || tag.length() == n || tag.length() > n + 6) return -1;
@@ -850,16 +857,20 @@ long releaseNumber(const String& tag) {
   return tag.substring(n).toInt();
 }
 
+// Without a token (public repository) the request is anonymous: GitHub allows
+// 60 per hour, and a check takes one plus one per updated file.
 Response githubApi(const char* path, const char* accept) {
-  const char* headers[] = {"Authorization: Bearer ", SECRET_GITHUB_TOKEN, "\r\nAccept: ", accept,
+  bool token = strlen(SECRET_GITHUB_TOKEN) > 0;
+  const char* headers[] = {token ? "Authorization: Bearer " : "", SECRET_GITHUB_TOKEN, token ? "\r\n" : "",
+                           "Accept: ", accept,
                            "\r\nUser-Agent: kindle-homeview\r\nX-GitHub-Api-Version: 2022-11-28\r\n",
                            nullptr};
   return httpsRequest("api.github.com", "GET", path, headers);
 }
 
 void sendLatestVersion(WiFiClient& c) {
-  if (strlen(SECRET_GITHUB_TOKEN) == 0) {
-    sendText(c, 503, "OTA non configurato: manca SECRET_GITHUB_TOKEN\n");
+  if (strlen(GITHUB_REPO) == 0) {
+    sendText(c, 503, "OTA not configured: OTA_GITHUB_REPO is empty\n");
     return;
   }
   Response r = githubApi(fmtPath("/repos/%s/git/matching-refs/tags/%s", GITHUB_REPO, OTA_TAG_PREFIX),
@@ -874,7 +885,7 @@ void sendLatestVersion(WiFiClient& c) {
     if (!deserializeJson(doc, body, DeserializationOption::Filter(filter))) {
       for (JsonObject ref : doc.as<JsonArray>()) {
         String tag = String(ref["ref"] | "").substring(strlen("refs/tags/"));
-        long n = releaseNumber(tag);  // confronto numerico: kindle-v10 viene dopo kindle-v9
+        long n = releaseNumber(tag);  // numeric comparison: kindle-v10 comes after kindle-v9
         if (n > best) {
           best = n;
           latest = tag;
@@ -885,18 +896,19 @@ void sendLatestVersion(WiFiClient& c) {
   tls.stop();
   if (best < 0) {
     sendText(c, r.code == 200 ? 404 : 502,
-             r.code == 200 ? String("nessun tag ") + OTA_TAG_PREFIX + "N\n" : "GitHub: HTTP " + String(r.code) + "\n");
+             r.code == 200 ? String("no ") + OTA_TAG_PREFIX + "N tag\n" : "GitHub: HTTP " + String(r.code) + "\n");
     return;
   }
   latestVersion = latest;
   sendText(c, 200, latest + "\n");
 }
 
-// Inoltra un file del repository. Solo la cartella kindle/ e solo a un tag di
-// rilascio, così l'Arduino non diventa un accesso libero al repository.
+// Relays a file of the repository. Only the kindle/ folder and only at a
+// release tag, so the Arduino doesn't become an open door to the repository.
 void sendRepoFile(WiFiClient& c, const String& tag, const String& path) {
-  if (releaseNumber(tag) < 0 || !path.startsWith("kindle/") || path.indexOf("..") >= 0) {
-    sendText(c, 400, "richiesta non valida\n");
+  if (strlen(GITHUB_REPO) == 0 || releaseNumber(tag) < 0 || !path.startsWith("kindle/") ||
+      path.indexOf("..") >= 0) {
+    sendText(c, 400, "invalid request\n");
     return;
   }
   Response r = githubApi(fmtPath("/repos/%s/contents/%s?ref=%s", GITHUB_REPO, path.c_str(), tag.c_str()),
@@ -917,19 +929,20 @@ void sendRepoFile(WiFiClient& c, const String& tag, const String& path) {
 }
 
 void handleClient() {
-  // accept() costruisce un WiFiClient, cioè alloca e libera 1 KB di heap, anche
-  // quando non c'è nessuno: chiamarla a ogni giro frammenta l'heap. 50 ms bastano.
+  // accept() constructs a WiFiClient, i.e. allocates and frees 1 KB of heap,
+  // even when nobody is there: calling it on every loop fragments the heap.
+  // 50 ms is plenty.
   static unsigned long acceptAt = 0;
   if (millis() - acceptAt < ACCEPT_INTERVAL_MS) return;
   acceptAt = millis();
-  // accept() restituisce ogni nuova connessione, anche quelle che non mandano
-  // nulla (i browser ne aprono in anticipo): così le chiudiamo dopo il timeout
-  // invece di lasciarle occupare i pochi socket del modulo WiFi.
+  // accept() returns every new connection, including those that send nothing
+  // (browsers open some ahead of time): this way we close them after the
+  // timeout instead of letting them hold the WiFi module's few sockets.
   WiFiClient c = server.accept();
   if (!c) return;
   c.setTimeout(1000);
-  String request = c.readStringUntil('\n');  // es. "GET /cmd?a=next HTTP/1.1"
-  while (c.connected()) {                    // salta gli header
+  String request = c.readStringUntil('\n');  // e.g. "GET /cmd?a=next HTTP/1.1"
+  while (c.connected()) {                    // skip the headers
     String h = c.readStringUntil('\n');
     if (h.length() <= 1) break;
   }
@@ -937,11 +950,11 @@ void handleClient() {
   String path = request.substring(a + 1, b);
 
   if (path == "/status" || path.startsWith("/status?")) {
-    String v = queryParam(path, "v");  // versione in uso sul Kindle
+    String v = queryParam(path, "v");  // version running on the Kindle
     if (releaseNumber(v) >= 0) kindleVersion = v;
     kindleSeenAt = millis();
-    // sleep=SECONDI: il Kindle sta per spegnere il WiFi per tanto (pausa),
-    // quindi nel frattempo non va segnalato come spento
+    // sleep=SECONDS: the Kindle is about to turn its WiFi off for that long
+    // (idle pause), so it isn't reported offline in the meantime
     kindleAwayMs = constrain(queryParam(path, "sleep").toInt(), 0L, 24L * 3600) * 1000UL;
     sendText(c, 200, buildStatus());
   } else if (path == "/ota/version") {
@@ -957,15 +970,15 @@ void handleClient() {
     sendWebapp(c);
   } else if (path == "/log") {
     struct mallinfo mi = mallinfo();
-    size_t lo = 0, hi = 16384;  // blocco contiguo più grande (ricerca binaria)
+    size_t lo = 0, hi = 16384;  // largest contiguous block (binary search)
     while (lo < hi) {
       size_t mid = (lo + hi + 1) / 2;
       void* q = malloc(mid);
       if (q) { free(q); lo = mid; } else hi = mid - 1;
     }
-    String s = "secondi dall'avvio: " + String(millis() / 1000) + "\nstack libero (minimo): " +
-               String(stackFreeBytes()) + " B su " + String(APP_STACK_BYTES) + "\nheap libero: " +
-               String(mi.fordblks) + " B nell'arena, blocco max " + String(lo) + " B\n";
+    String s = "seconds since boot: " + String(millis() / 1000) + "\nfree stack (minimum): " +
+               String(stackFreeBytes()) + " B of " + String(APP_STACK_BYTES) + "\nfree heap: " +
+               String(mi.fordblks) + " B in the arena, largest block " + String(lo) + " B\n";
     for (int i = 0; i < LOG_LINES; i++) {
       const char* line = errLog[(errLogNext + i) % LOG_LINES];
       if (line[0]) { s += line; s += "\n"; }
@@ -979,36 +992,37 @@ void handleClient() {
     bool ok = valid && shellySetLight(LIGHTS[i].id, queryParam(path, "on") == "1", queryParam(path, "b").toInt());
     sendCommandResult(c, valid ? (ok ? 200 : 502) : 400);
   } else {
-    sendText(c, 404, "non trovato\n");
+    sendText(c, 404, "not found\n");
   }
   delay(1);
   c.stop();
 }
 
-// ---- Watchdog e diagnostica ----
-// Il WDT hardware dell'R4 arriva al massimo a ~5,6 s, troppo poco per una
-// richiesta HTTPS lenta. Lo rinfresca un timer a 4 Hz, ma solo finché loop()
-// gira: se loop() resta bloccata per LOOP_STUCK_MS il timer smette e il WDT
-// resetta la scheda. Se invece loop() gira ma il Cloud resta scollegato per
-// CLOUD_STUCK_MS, la scheda si resetta da sola: al riavvio WiFiS3 resetta anche
-// il modulo WiFi. Il controllo non guarda WiFi.status(), perché con il modulo
-// WiFi bloccato anche quello risponde "non connesso".
-// Durante un OTA del Cloud loop() può restare ferma a lungo mentre il modulo
-// WiFi scarica il firmware: in quel caso si tollera fino a OTA_STUCK_MS.
-// Per OTA_PAUSE_MS dall'annuncio dell'OTA lo sketch non usa la rete (né
-// server né HTTPS): i comandi al modulo WiFi durante il download lo bloccano.
+// ---- Watchdog and diagnostics ----
+// The R4's hardware WDT tops out at ~5.6 s, too short for a slow HTTPS
+// request. A 4 Hz timer refreshes it, but only while loop() is running: if
+// loop() stays stuck for LOOP_STUCK_MS the timer stops and the WDT resets the
+// board. If instead loop() runs but the Cloud stays disconnected for
+// CLOUD_STUCK_MS, the board resets itself: on reboot WiFiS3 also resets the
+// WiFi module. The check doesn't look at WiFi.status(), because with the WiFi
+// module stuck that also answers "not connected".
+// During a Cloud OTA, loop() can stall for a long time while the WiFi module
+// downloads the firmware: in that case up to OTA_STUCK_MS is tolerated.
+// For OTA_PAUSE_MS after the OTA is announced the sketch doesn't use the
+// network (neither server nor HTTPS): commands to the WiFi module during the
+// download make it hang.
 const unsigned long LOOP_STUCK_MS = 60UL * 1000;
 const unsigned long OTA_STUCK_MS = 5UL * 60 * 1000;
 const unsigned long OTA_WINDOW_MS = 10UL * 60 * 1000;
 const unsigned long OTA_PAUSE_MS = 3UL * 60 * 1000;
 const unsigned long CLOUD_STUCK_MS = 10UL * 60 * 1000;
 const unsigned long KINDLE_TIMEOUT_MS = 2UL * 60 * 1000;
-const unsigned long NET_SETTLE_MS = 5000;  // appena connesso il WiFi, DNS e Internet non sono ancora pronti
+const unsigned long NET_SETTLE_MS = 5000;  // right after WiFi connects, DNS and Internet aren't ready yet
 
 FspTimer wdtTimer;
 
 volatile unsigned long loopAliveAt = 0;
-volatile unsigned long otaRequestAt = 0;  // 0 = nessun OTA in corso
+volatile unsigned long otaRequestAt = 0;  // 0 = no OTA in progress
 unsigned long cloudOkAt = 0;
 
 void wdtTick(timer_callback_args_t*) {
@@ -1017,8 +1031,8 @@ void wdtTick(timer_callback_args_t*) {
   if (now - loopAliveAt < (ota ? OTA_STUCK_MS : LOOP_STUCK_MS)) WDT.refresh();
 }
 
-// Il Cloud la chiama quando arriva un OTA: lo accettiamo sempre, ma intanto
-// il watchdog diventa più tollerante
+// The Cloud calls this when an OTA arrives: we always accept it, but the
+// watchdog becomes more tolerant meanwhile
 bool onOtaRequest() {
   otaRequestAt = millis() | 1;
   return true;
@@ -1031,53 +1045,53 @@ void startWatchdog() {
   int8_t ch = FspTimer::get_available_timer(type);
   if (ch < 0 || !wdtTimer.begin(TIMER_MODE_PERIODIC, type, ch, 4.0f, 0.0f, wdtTick) ||
       !wdtTimer.setup_overflow_irq() || !wdtTimer.open() || !wdtTimer.start()) {
-    logError("Watchdog: timer non disponibile, watchdog disattivato");
+    logError("Watchdog: no timer available, watchdog disabled");
     return;
   }
   WDT.begin(5000);
 }
 
-// Perché la scheda è ripartita (registro di reset del RA4M1), in lastReset
+// Why the board restarted (RA4M1 reset register), into lastReset
 void reportResetCause() {
   if (R_SYSTEM->RSTSR1_b.WDTRF)
-    lastReset = "watchdog (loop bloccata)";
-  else if (R_SYSTEM->RSTSR1_b.SWRF) lastReset = "software (aggiornamento, Cloud scollegato o stack esaurito)";
-  else lastReset = "accensione o tasto reset";
+    lastReset = "watchdog (loop stuck)";
+  else if (R_SYSTEM->RSTSR1_b.SWRF) lastReset = "software (update, Cloud disconnected or stack overflow)";
+  else lastReset = "power on or reset button";
   R_SYSTEM->RSTSR1 = 0;
-  Serial.println("Riavvio: " + lastReset);
+  Serial.println("Restart: " + lastReset);
 }
 
 void updateDiagnostics() {
   static unsigned long memLogAt = 0;
   uptimeMin = millis() / 60000;
-  // Se lo stack ha toccato il fondo ha già sporcato le variabili sotto: meglio
-  // ripartire puliti che continuare con dati corrotti.
+  // If the stack hit the bottom it has already clobbered the variables below:
+  // better to restart clean than carry on with corrupted data.
   if (stackFreeBytes() == 0) {
-    Serial.println("Stack esaurito: riavvio");
+    Serial.println("Stack overflow: restarting");
     delay(100);
     NVIC_SystemReset();
   }
   if (millis() - memLogAt > 5UL * 60 * 1000) {
     memLogAt = millis();
     struct mallinfo mi = mallinfo();
-    Serial.println("Memoria: stack libero " + String(stackFreeBytes()) + " B, heap " + String(mi.uordblks) +
-                   " B usati, " + String(mi.fordblks) + " B liberi nell'arena");
+    Serial.println("Memory: free stack " + String(stackFreeBytes()) + " B, heap " + String(mi.uordblks) +
+                   " B used, " + String(mi.fordblks) + " B free in the arena");
   }
   spotifyOk = sp.configured && sp.ok;
   kindleOnline = kindleSeenAt != 0 && millis() - kindleSeenAt < KINDLE_TIMEOUT_MS + kindleAwayMs;
 }
 
 // ---- Stack ----
-// Il core dell'UNO R4 riserva solo 1 KB di stack. Il parsing JSON legge dalla
-// rete mentre è in ricorsione (e le letture passano per vsnprintf nel modem):
-// supera 1 KB e finisce sopra l'heap, cioè proprio sul documento JSON appena
-// allocato. Risultato: previsioni a zero o HardFault. Per questo setup() e
-// loop() girano su uno stack nostro, più grande; anche gli interrupt lo usano.
-// APP_STACK_BYTES è in cima, con le altre impostazioni
+// The UNO R4 core reserves only 1 KB of stack. JSON parsing reads from the
+// network while recursing (and reads go through vsnprintf in the modem): it
+// exceeds 1 KB and ends up on top of the heap, i.e. right on the JSON document
+// just allocated. Result: zeroed forecasts or a HardFault. That's why setup()
+// and loop() run on a larger stack of our own; interrupts use it too.
+// APP_STACK_BYTES is at the top, with the other settings
 const uint32_t STACK_PAINT = 0xA5A5A5A5;
 alignas(8) uint32_t appStack[APP_STACK_BYTES / 4];
 
-// Chiama fn() con lo stack pointer in cima ad appStack, poi torna allo stack di prima
+// Calls fn() with the stack pointer at the top of appStack, then switches back
 void runOnAppStack(void (*fn)()) {
   register void (*f)() asm("r4") = fn;
   register uint32_t* top asm("r5") = appStack + APP_STACK_BYTES / 4;
@@ -1095,7 +1109,7 @@ void runOnAppStack(void (*fn)()) {
         "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7");
 }
 
-// Byte di appStack mai usati dall'avvio (lo stack cresce verso il basso)
+// Bytes of appStack never used since boot (the stack grows downwards)
 int stackFreeBytes() {
   int n = 0;
   while (n < (int)APP_STACK_BYTES && appStack[n / 4] == STACK_PAINT) n += 4;
@@ -1103,7 +1117,7 @@ int stackFreeBytes() {
 }
 
 bool serverStarted = false;
-unsigned long wifiUpAt = 0;  // 0 = WiFi non connesso
+unsigned long wifiUpAt = 0;  // 0 = WiFi not connected
 
 void appSetup();
 void appLoop();
@@ -1117,7 +1131,7 @@ void loop() { runOnAppStack(appLoop); }
 
 void appSetup() {
   Serial.begin(9600);
-  delay(1500);  // dà tempo di aprire il Serial Monitor
+  delay(1500);  // time to open the Serial Monitor
 
   refreshToken = SECRET_SPOTIFY_REFRESH_TOKEN;
   basicAuth = base64(String(SECRET_SPOTIFY_CLIENT_ID) + ":" + SECRET_SPOTIFY_CLIENT_SECRET);
@@ -1141,7 +1155,7 @@ void appLoop() {
   updateDiagnostics();
   if (ArduinoCloud.connected()) cloudOkAt = millis();
   if (millis() - cloudOkAt > CLOUD_STUCK_MS && !otaPaused()) {
-    Serial.println("Cloud scollegato da troppo tempo: riavvio");
+    Serial.println("Cloud disconnected for too long: restarting");
     delay(100);
     NVIC_SystemReset();
   }
@@ -1154,14 +1168,14 @@ void appLoop() {
   if (!serverStarted && WiFi.localIP() != IPAddress(0, 0, 0, 0)) {
     server.begin();
     serverStarted = true;
-    Serial.print("Gateway pronto: http://");
+    Serial.print("Gateway ready: http://");
     Serial.print(WiFi.localIP());
     Serial.println("/");
   }
 
   handleClient();
   if (millis() - wifiUpAt < NET_SETTLE_MS) return;
-  // Al massimo un'operazione lenta per giro, così il Cloud viene servito spesso
+  // At most one slow operation per loop, so the Cloud gets serviced often
   if (due(nextNtpAt)) syncTime();
   else if (due(nextWeatherAt)) updateWeather();
   else if (sp.configured && due(nextSpotifyAt)) updateNowPlaying();

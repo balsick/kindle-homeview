@@ -1,7 +1,7 @@
 #pragma once
 
-// Webapp servita su http://IP_ARDUINO/ (solo LAN). Per modificarla con
-// l'anteprima nel browser: python3 tools/webapp_dev.py
+// Webapp served at http://ARDUINO_IP/ (LAN only), with its text in Italian.
+// To edit it with a live preview in the browser: python3 tools/webapp_dev.py
 static const char WEBAPP_HTML[] = R"html(<!doctype html>
 <html lang="it">
 <head>
@@ -81,7 +81,7 @@ button:disabled,.switch:disabled{opacity:.4}
 </main>
 <script>
 const $ = id => document.getElementById(id);
-const touched = {};  // luce -> ultima modifica locale, per non farsi sovrascrivere dal polling
+const touched = {};  // light -> last local change, so polling doesn't overwrite it
 let rows = [];
 
 const mmss = s => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");

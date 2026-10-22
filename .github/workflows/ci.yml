@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: for f in kindle/*.sh tools/*.sh; do sh -n "$f"; done
+      - name: OTA files end with the marker
+        run: |
+          for f in $(grep -v '^#' kindle/ota-files | grep -v '^$'); do
+            [ "$(tail -n 1 "kindle/$f")" = "# ota:end" ] || { echo "kindle/$f: missing # ota:end"; exit 1; }
+          done
+      - name: Python syntax
+        run: python3 -m py_compile tools/*.py
+
+  sketch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use the example configuration
+        run: |
+          cd arduino/kindle_gateway
+          cp arduino_secrets.h.example arduino_secrets.h
+          cp home_config.h.example home_config.h
+      - uses: arduino/compile-sketches@v1
+        with:
+          fqbn: arduino:renesas_uno:unor4wifi
+          sketch-paths: arduino/kindle_gateway
+          libraries: |
+            - name: ArduinoIoTCloud
+            - name: ArduinoJson

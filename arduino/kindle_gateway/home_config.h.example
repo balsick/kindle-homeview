@@ -1,19 +1,23 @@
-// Copia questo file in "home_config.h" e metti i dati di casa tua.
-// home_config.h è escluso da git, come arduino_secrets.h.
+// Copy this file to "home_config.h" and put in your own home's data.
+// home_config.h is kept out of git, like arduino_secrets.h.
 
-// Posizione per il meteo (Open-Meteo)
+// Location for the weather (Open-Meteo)
 const float LATITUDE = 45.4642;
 const float LONGITUDE = 9.1900;
 
-// Luci per la webapp: stessi canali e nomi di config.sh sul Kindle
-const char* const SHELLY_HOST = "192.168.1.50";  // IP dello Shelly (riservalo nel router)
+// Lights for the webapp: same channels and names as config.sh on the Kindle
+const char* const SHELLY_HOST = "192.168.1.50";  // Shelly IP (reserve it in your router)
 const Light LIGHTS[] = {{"Soggiorno", 0}, {"Cucina", 1}, {"Studio", 2}};
 
-// Spotify: la musica conta solo se suona su un dispositivo di questo tipo
-// (gli Echo sono "Speaker"; il telefono è "Smartphone", il Mac "Computer").
+// Spotify: music only counts if it plays on a device of this type
+// (Echos are "Speaker"; a phone is "Smartphone", a Mac "Computer").
 const char* const SPOTIFY_HOME_TYPE = "Speaker";
-// Dove far partire la musica col tasto Indietro, se a casa non suona niente
+// Where the Back key starts music when nothing is playing at home
 const char* const SPOTIFY_HOME_DEVICE = "Soggiorno";
-// Playlist di riserva se non c'è niente da riprendere ("" = nessuna),
-// es. "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"
+// Fallback playlist when there's nothing to resume ("" = none),
+// e.g. "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"
 const char* const SPOTIFY_FALLBACK_CONTEXT = "";
+
+// GitHub repository the Kindle takes its OTA updates from (its kindle-vN
+// tags). Point it at your fork to publish your own releases; "" turns OTA off.
+// #define OTA_GITHUB_REPO "balsick/kindle-homeview"

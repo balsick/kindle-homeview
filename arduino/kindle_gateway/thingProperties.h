@@ -4,7 +4,7 @@
 #include "configuratorAgents/agents/SerialAgent.h"
 
 
-// Variabili del Thing (diagnostica, tutte in sola lettura)
+// Thing variables (diagnostics, all read-only)
 String lastError;
 String lastReset;
 int uptimeMin;
@@ -12,8 +12,8 @@ bool kindleOnline;
 bool spotifyOk;
 bool weatherOk;
 
-// Niente agente Bluetooth: costava ~1,6 KB di RAM, che servono all'heap per
-// l'HTTPS. Il WiFi si configura via USB dal Cloud (agente seriale).
+// No Bluetooth agent: it cost ~1.6 KB of RAM that the heap needs for HTTPS.
+// WiFi is configured over USB from the Cloud (serial agent).
 KVStore kvStore;
 SerialAgentClass SerialAgent;
 WiFiConnectionHandler ArduinoIoTPreferredConnection; 

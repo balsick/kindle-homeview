@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Anteprima sul PC della schermata del Kindle.
+"""Previews the Kindle screen on your computer.
 
-Esegue "dashboard.sh preview" con un finto FBInk che registra i comandi, poi
-li ridisegna in un PNG 600x800. L'anteprima viene quindi dal codice vero: se
-modifichi il layout in dashboard.sh o defaults.sh, cambia anche lei.
+Runs "dashboard.sh preview" with a fake FBInk that records the commands, then
+redraws them into a 600x800 PNG. So the preview comes from the real code: if
+you change the layout in dashboard.sh or defaults.sh, the preview follows.
 
-    python3 tools/preview.py                      # crea preview.png
-    python3 tools/preview.py --watch              # la rigenera a ogni modifica
-    python3 tools/preview.py --status mio.txt --lights "1:100 0:50 1:20"
-    python3 tools/preview.py --screen qr          # schermata dei QR (tasto Home)
+    python3 tools/preview.py                      # creates preview.png
+    python3 tools/preview.py --watch              # regenerates it on every change
+    python3 tools/preview.py --status my.txt --lights "1:100 0:50 1:20"
+    python3 tools/preview.py --screen qr          # QR screen (Home key)
 
-Serve Pillow (pip install pillow); per la schermata QR senza aver ancora
-eseguito make_qr.py serve anche segno, per creare QR di esempio. È un'approssimazione: le metriche dei font
-di FBInk e i 16 livelli di grigio dell'e-ink possono differire di qualche pixel.
+Needs Pillow (pip install pillow); for the QR screen before running
+make_qr.py it also needs segno, to create sample QR codes. It's an
+approximation: FBInk's font metrics and the 16 gray levels of e-ink can
+differ by a few pixels.
 """
 
 import argparse
@@ -39,11 +40,11 @@ FONT_DIRS = [
 
 
 def record_commands(status, lights, screen):
-    """Esegue dashboard.sh preview e restituisce i comandi FBInk, uno per lista."""
+    """Runs dashboard.sh preview and returns the FBInk commands, one list each."""
     with tempfile.TemporaryDirectory() as tmp:
         qr_dir = KINDLE_DIR / "qr"
         if screen == "qr" and not (qr_dir / "wifi.png").exists():
-            # QR di esempio, per non toccare kindle/qr/
+            # Sample QR codes, so kindle/qr/ stays untouched
             import make_qr
             qr_dir = Path(tmp) / "qr"
             make_qr.make(qr_dir, "Casa-Ospiti", "benvenuti2026", "WPA", "http://192.168.1.60/")
@@ -58,13 +59,13 @@ def record_commands(status, lights, screen):
         env = dict(os.environ, RUN=str(Path(tmp) / "run"), PREVIEW_FBINK=str(shim), QR_DIR=str(qr_dir))
         subprocess.run(["sh", str(KINDLE_DIR / "dashboard.sh"), "preview", str(status), lights, screen],
                        env=env, check=True)
-        # Le immagini vanno lette finché la cartella temporanea esiste
+        # Images must be read while the temporary folder still exists
         commands = [json.loads(line) for line in log.read_text().splitlines()]
         return [load_images(c) for c in commands]
 
 
 def load_images(args):
-    """Sostituisce il percorso dopo -g con l'immagine già caricata."""
+    """Replaces the path after -g with the already loaded image."""
     if "-g" in args:
         i = args.index("-g") + 1
         spec = parse_spec(args[i])
@@ -89,7 +90,7 @@ def load_font(path, px):
                 fonts[key] = ImageFont.truetype(str(d / key[0]), px)
                 break
         else:
-            sys.exit(f"Font {key[0]} non trovato: copialo in {KINDLE_DIR / 'fonts'}")
+            sys.exit(f"Font {key[0]} not found: copy it into {KINDLE_DIR / 'fonts'}")
     return fonts[key]
 
 
@@ -97,7 +98,7 @@ def draw_text(draw, spec, text, centered):
     font = load_font(spec["regular"], int(spec["px"]))
     left = int(spec.get("left", 0))
     box_w = SCREEN_W - left - int(spec.get("right", 0))
-    # Come FBInk: una riga sola, troncata con "…" se non ci sta
+    # Like FBInk: a single line, truncated with "…" if it doesn't fit
     if draw.textlength(text, font=font) > box_w:
         while text and draw.textlength(text + "…", font=font) > box_w:
             text = text[:-1]
@@ -139,19 +140,19 @@ def render(commands):
 def build(args):
     img = render(record_commands(args.status, args.lights, args.screen))
     img.save(args.out)
-    print(f"{time.strftime('%H:%M:%S')}  anteprima salvata in {args.out}")
+    print(f"{time.strftime('%H:%M:%S')}  preview saved to {args.out}")
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--status", default=ROOT / "tools/sample_status.txt", type=Path,
-                   help="file di stato come quello restituito da /status dell'Arduino")
+                   help="state file like the one returned by the Arduino's /status")
     p.add_argument("--lights", default="1:60 1:30 0:50",
-                   help='stato delle luci "accesa:luminosità" (default: "1:60 1:30 0:50")')
+                   help='light states as "on:brightness" (default: "1:60 1:30 0:50")')
     p.add_argument("--screen", default="main", choices=["main", "qr"],
-                   help="schermata principale o quella dei QR (tasto Home)")
-    p.add_argument("--out", type=Path, help="default: preview.png, o preview-qr.png con --screen qr")
-    p.add_argument("--watch", action="store_true", help="rigenera quando cambiano script, config o stato")
+                   help="main screen or the QR screen (Home key)")
+    p.add_argument("--out", type=Path, help="default: preview.png, or preview-qr.png with --screen qr")
+    p.add_argument("--watch", action="store_true", help="regenerate when scripts, config or state change")
     args = p.parse_args()
     args.out = args.out or ROOT / ("preview-qr.png" if args.screen == "qr" else "preview.png")
 
@@ -170,7 +171,7 @@ def main():
             try:
                 build(args)
             except (subprocess.CalledProcessError, SystemExit) as e:
-                print(f"errore: {e}")
+                print(f"error: {e}")
 
 
 if __name__ == "__main__":

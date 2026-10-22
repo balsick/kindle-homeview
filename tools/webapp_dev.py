@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Anteprima della webapp nel browser del PC, con API finte.
+"""Previews the webapp in your computer's browser, with fake APIs.
 
-    python3 tools/webapp_dev.py          # poi apri http://localhost:8000/
+    python3 tools/webapp_dev.py          # then open http://localhost:8000/
 
-Serve la pagina contenuta in arduino/kindle_gateway/webapp.h, riletta a ogni
-richiesta: modifica webapp.h e ricarica il browser. Luci e Spotify sono
-simulati in memoria, così i controlli rispondono come sull'Arduino.
+Serves the page in arduino/kindle_gateway/webapp.h, re-read on every request:
+edit webapp.h and reload the browser. Lights and Spotify are simulated in
+memory, so the controls respond as they do on the Arduino.
 """
 
 import argparse
@@ -65,7 +65,7 @@ class Handler(BaseHTTPRequestHandler):
                 light["b"] = max(1, min(100, int(q.get("b", light["b"]))))
             self.reply(200, "ok\n")
         elif url.path == "/api/ota":
-            state["ota"]["kindle"] = state["ota"]["latest"]  # come se il Kindle si fosse aggiornato
+            state["ota"]["kindle"] = state["ota"]["latest"]  # as if the Kindle had updated
             self.reply(200, "ok\n")
         elif url.path in ("/api/cmd", "/cmd"):
             a, sp = q.get("a"), state["sp"]
@@ -75,7 +75,7 @@ class Handler(BaseHTTPRequestHandler):
                 sp["progress"], state["started"] = 0, time.time()
             self.reply(200, "ok\n")
         else:
-            self.reply(404, "non trovato\n")
+            self.reply(404, "not found\n")
 
     def reply(self, code, body, ctype="text/plain; charset=utf-8"):
         data = body.encode()
@@ -93,7 +93,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", type=int, default=8000)
     args = p.parse_args()
-    print(f"Webapp su http://localhost:{args.port}/ (Ctrl+C per uscire)")
+    print(f"Webapp at http://localhost:{args.port}/ (Ctrl+C to quit)")
     ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
 
 

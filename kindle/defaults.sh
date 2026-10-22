@@ -1,60 +1,60 @@
-# Valori predefiniti del pannello. NON modificarlo sul Kindle: viene
-# sostituito dagli aggiornamenti OTA. Per cambiare un valore ridefiniscilo
-# in config.sh, che resta solo sul Kindle (vedi config.example.sh).
+# Panel defaults. DON'T edit this on the Kindle: OTA updates replace it.
+# To change a value, redefine it in config.sh, which stays on the Kindle
+# only (see config.example.sh). Text shown on screen is in Italian.
 
-ARDUINO_HOST="192.168.1.60"   # IP dell'UNO R4 WiFi (riservalo nel router)
-SHELLY_HOST="192.168.1.50"    # IP dello Shelly Plus RGBW PM (profilo "light", 4 canali)
+ARDUINO_HOST="192.168.1.60"   # IP of the UNO R4 WiFi (reserve it in your router)
+SHELLY_HOST="192.168.1.50"    # IP of the Shelly Plus RGBW PM ("light" profile, 4 channels)
 
-# Le luci, nello stesso ordine in tutte le righe sotto.
-LIGHT_IDS="0 1 2"                                 # canale Shelly (0-3)
+# The lights, in the same order in all the lines below.
+LIGHT_IDS="0 1 2"                                 # Shelly channel (0-3)
 LIGHT_NAMES="Soggiorno|Cucina|Studio"
-STEP=10                                           # passo di luminosità in %
-VOLUME_STEP=10                                    # passo del volume di Spotify in %
+STEP=10                                           # brightness step in %
+VOLUME_STEP=10                                    # Spotify volume step in %
 
-# Tasti: codici misurati su un Kindle 5 (firmware 4.1.4) con
-# "dashboard.sh keytest". Se il tuo Kindle dà codici diversi, ridefiniscili
-# in config.sh.
+# Keys: codes measured on a Kindle 5 (firmware 4.1.4) with
+# "dashboard.sh keytest". If your Kindle gives different codes, redefine
+# them in config.sh.
 INPUT_DEVICES="/dev/input/event0 /dev/input/event1"
 
-# Joystick: le luci. ▲▼ sceglie la luce, ◀▶ la luminosità, centro on/off
+# Joystick: the lights. ▲▼ picks the light, ◀▶ brightness, center on/off
 KEY_UP=103
 KEY_DOWN=108
 KEY_LEFT=105
 KEY_RIGHT=106
 KEY_CENTER=194
 
-# Tasti pagina ai lati: la musica che suona a casa
-KEY_VOL_UP=104      # sinistra, avanti
-KEY_VOL_DOWN=193    # sinistra, indietro
-KEY_TRACK_NEXT=191  # destra, avanti
-KEY_TRACK_PREV=109  # destra, indietro
+# Page keys on the sides: the music playing at home
+KEY_VOL_UP=104      # left, forward
+KEY_VOL_DOWN=193    # left, back
+KEY_TRACK_NEXT=191  # right, forward
+KEY_TRACK_PREV=109  # right, back
 
-KEY_PLAY=158      # Indietro: pausa, o fa partire la musica a casa
-KEY_ALL=29        # Tastiera: spegne tutte le luci / le riaccende
-KEY_REFRESH=139   # Menu: refresh completo dello schermo
-KEY_QR=102        # Home: QR del WiFi ospiti e della webapp
+KEY_PLAY=158      # Back: pause, or start music at home
+KEY_ALL=29        # Keyboard: switches all lights off / back on
+KEY_REFRESH=139   # Menu: full screen refresh
+KEY_QR=102        # Home: QR codes for the guest WiFi and the webapp
 
-# Legenda nella fascia in basso: cambia se la musica suona a casa o no
+# Legend in the bottom strip: changes depending on whether music plays at home
 LEGEND_MUSIC="lati: volume · brani  ·  ↩ pausa  ·  ⌨ luci  ·  ⌂ QR"
 LEGEND_IDLE="↩ musica a casa  ·  ⌨ tutte le luci  ·  ⌂ WiFi ospiti"
 LEGEND_PAUSE="premi un tasto"
-QR_SECONDS=120    # dopo quanto la schermata dei QR si chiude da sola
-BATTERY_LOW=20    # sotto questa percentuale la batteria è in grassetto
+QR_SECONDS=120    # after how long the QR screen closes by itself
+BATTERY_LOW=20    # below this percentage the battery is shown in bold
 
-# Consumi. Il WiFi è la voce più pesante: si chiede lo stato all'Arduino una
-# volta al minuto (allo scatto dell'ora), più spesso solo con la musica o in carica.
-POLL_SECONDS=10          # con la musica che suona o in carica: ogni quanto chiedere lo stato
-FULL_REFRESH_MINUTES=240 # refresh completo periodico contro il ghosting
-IDLE_MINUTES=10          # senza cambiamenti per tanto, pausa: WiFi spento (0 = mai)
-SLEEP_CHECK_MINUTES=15   # in pausa: ogni quanto riaccendere il WiFi per controllare
-BATTERY_LOG_MINUTES=30   # ogni quanto annotare la batteria in battery.log (0 = mai)
+# Power. WiFi is the biggest drain: the Arduino is asked for the state once a
+# minute (when the minute ticks over), more often only with music or while charging.
+POLL_SECONDS=10          # with music playing or while charging: how often to ask for the state
+FULL_REFRESH_MINUTES=240 # periodic full refresh against ghosting
+IDLE_MINUTES=10          # after this long without changes, pause: WiFi off (0 = never)
+SLEEP_CHECK_MINUTES=15   # while paused: how often to turn WiFi back on to check
+BATTERY_LOG_MINUTES=30   # how often to note the battery in battery.log (0 = never)
 
-# Aggiornamenti OTA da GitHub, tramite l'Arduino (vedi ota.sh)
+# OTA updates from GitHub, through the Arduino (see ota.sh)
 OTA_ENABLED=1
-OTA_CHECK_HOURS=24      # controllo periodico; si può anche forzare dalla webapp
-OTA_HEALTH_SECONDS=45   # entro quanto la nuova versione deve dimostrare di funzionare
+OTA_CHECK_HOURS=24      # periodic check; it can also be forced from the webapp
+OTA_HEALTH_SECONDS=45   # how long the new version has to prove it works
 
-# Percorsi locali, relativi alla cartella del pannello
+# Local paths, relative to the panel folder
 FBINK="$DIR/bin/fbink"
 FONT="$DIR/fonts/DejaVuSans.ttf"
 FONT_BOLD="$DIR/fonts/DejaVuSans-Bold.ttf"

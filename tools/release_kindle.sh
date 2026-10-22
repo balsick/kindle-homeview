@@ -1,48 +1,48 @@
 #!/bin/sh
-# Pubblica sul Kindle (via OTA) la cartella kindle/ del commit attuale:
-# crea e pubblica il tag kindle-vN successivo. Il Kindle si aggiorna solo
-# con questi tag, non a ogni push su main.
+# Publishes the kindle/ folder of the current commit to the Kindle (over OTA):
+# creates and pushes the next kindle-vN tag. The Kindle only updates on these
+# tags, not on every push to main.
 #
-#   tools/release_kindle.sh          controlla, mostra le modifiche, chiede conferma
-#   tools/release_kindle.sh --yes    senza conferma
+#   tools/release_kindle.sh          checks, shows the changes, asks to confirm
+#   tools/release_kindle.sh --yes    without confirmation
 
 set -e
 cd "$(dirname "$0")/.."
 
-fail() { echo "Errore: $*" >&2; exit 1; }
+fail() { echo "Error: $*" >&2; exit 1; }
 
 git fetch -q --tags origin
-[ -z "$(git status --porcelain -- kindle/)" ] || fail "kindle/ ha modifiche non committate"
-git branch -r --contains HEAD | grep -q . || fail "il commit attuale non è ancora su GitHub: fai prima push"
+[ -z "$(git status --porcelain -- kindle/)" ] || fail "kindle/ has uncommitted changes"
+git branch -r --contains HEAD | grep -q . || fail "the current commit isn't on GitHub yet: push first"
 
 last=$(git tag -l 'kindle-v*' | sed 's/^kindle-v//' | grep -E '^[0-9]+$' | sort -n | tail -n 1)
 next=$((${last:-0} + 1))
 if [ -n "$last" ] && git diff --quiet "kindle-v$last" HEAD -- kindle/; then
-  echo "Nessuna modifica in kindle/ da kindle-v$last: niente da pubblicare."
+  echo "No changes in kindle/ since kindle-v$last: nothing to publish."
   exit 0
 fi
 
-# Gli stessi controlli che fa il Kindle prima di accettare un aggiornamento
+# The same checks the Kindle runs before accepting an update
 for f in $(grep -v '^#' kindle/ota-files | grep -v '^$'); do
-  [ -f "kindle/$f" ] || fail "kindle/$f è in ota-files ma non esiste"
-  [ "$(tail -n 1 "kindle/$f")" = "# ota:end" ] || fail "kindle/$f non finisce con la riga \"# ota:end\""
+  [ -f "kindle/$f" ] || fail "kindle/$f is listed in ota-files but doesn't exist"
+  [ "$(tail -n 1 "kindle/$f")" = "# ota:end" ] || fail "kindle/$f doesn't end with the line \"# ota:end\""
   case "$f" in
-    *.sh) sh -n "kindle/$f" || fail "kindle/$f ha errori di sintassi" ;;
+    *.sh) sh -n "kindle/$f" || fail "kindle/$f has syntax errors" ;;
   esac
 done
 
 if [ -n "$last" ]; then
-  echo "Modifiche in kindle/ da kindle-v$last:"
+  echo "Changes in kindle/ since kindle-v$last:"
   git diff --stat "kindle-v$last" HEAD -- kindle/
 else
-  echo "Primo rilascio per il Kindle."
+  echo "First release for the Kindle."
 fi
 
 if [ "$1" != "--yes" ]; then
-  printf 'Pubblico kindle-v%s? [s/N] ' "$next"
+  printf 'Publish kindle-v%s? [y/N] ' "$next"
   read -r answer
-  [ "$answer" = s ] || [ "$answer" = S ] || { echo "Annullato."; exit 0; }
+  [ "$answer" = y ] || [ "$answer" = Y ] || { echo "Cancelled."; exit 0; }
 fi
 git tag -a "kindle-v$next" -m "Kindle v$next"
 git push -q origin "kindle-v$next"
-echo "Pubblicato kindle-v$next: il Kindle si aggiorna al prossimo controllo (o col pulsante Aggiorna della webapp)."
+echo "Published kindle-v$next: the Kindle updates at its next check (or with the webapp's Update button)."

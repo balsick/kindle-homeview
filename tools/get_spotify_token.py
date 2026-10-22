@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Ottiene il refresh token Spotify per lo sketch Arduino.
+"""Gets the Spotify refresh token for the Arduino sketch.
 
-Da eseguire una volta sul PC (serve solo Python 3, nessuna libreria esterna).
-Nell'app sul developer dashboard di Spotify deve esserci il Redirect URI
+Run it once on your computer (needs only Python 3, no external libraries).
+The app on the Spotify developer dashboard must have the Redirect URI
 http://127.0.0.1:8888/callback
 """
 
@@ -42,18 +42,18 @@ def main():
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
-            self.wfile.write("Fatto, puoi chiudere questa pagina.".encode())
+            self.wfile.write("Done, you can close this page.".encode())
 
         def log_message(self, *args):
             pass
 
     server = http.server.HTTPServer(("127.0.0.1", 8888), Handler)
-    print("Apro il browser per l'autorizzazione. Se non si apre, visita:\n" + auth_url)
+    print("Opening the browser for authorization. If it doesn't open, visit:\n" + auth_url)
     webbrowser.open(auth_url)
     while "code" not in result and "error" not in result:
         server.handle_request()
     if "error" in result:
-        sys.exit("Autorizzazione negata: " + result["error"])
+        sys.exit("Authorization denied: " + result["error"])
 
     credentials = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
     request = urllib.request.Request(
@@ -71,7 +71,7 @@ def main():
     with urllib.request.urlopen(request) as response:
         tokens = json.load(response)
 
-    print("\nCopia questa riga in arduino_secrets.h:\n")
+    print("\nCopy this line into arduino_secrets.h:\n")
     print(f'#define SECRET_SPOTIFY_REFRESH_TOKEN "{tokens["refresh_token"]}"')
 
 

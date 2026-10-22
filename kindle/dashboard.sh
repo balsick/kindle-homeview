@@ -1,32 +1,32 @@
 #!/bin/sh
-# Pannello domestico per Kindle 5 (firmware 4.1.x con jailbreak).
+# Home panel for the Kindle 5 (jailbroken firmware 4.1.x).
 #
-# Uso:  sh /mnt/us/dashboard/dashboard.sh start|stop|restart|update|keytest|autostart on|off
-#       (preview è usato da tools/preview.py per l'anteprima sul PC)
+# Usage: sh /mnt/us/dashboard/dashboard.sh start|stop|restart|update|keytest|autostart on|off
+#        (preview is used by tools/preview.py to render the screen on a computer)
 #
-# Processi:
-#   - lettori tasti: uno per /dev/input/eventX, scrivono "codice valore" in una FIFO
-#   - input (principale): legge la FIFO, aggiorna lo stato e ridisegna la riga della luce
-#   - sender: invia allo Shelly l'ultimo valore quando i tasti si fermano (debounce)
-#   - poller: legge /status dall'Arduino e ridisegna ora, meteo, Spotify e luci;
-#             lancia anche il controllo degli aggiornamenti OTA (ota.sh) e,
-#             quando non cambia niente, spegne il WiFi (pausa)
-# Ogni zona dello schermo viene ridisegnata solo se il suo contenuto è cambiato.
-# Il tasto Home mostra i QR (WiFi ospiti e webapp); un tasto qualsiasi torna indietro.
+# Processes:
+#   - key readers: one per /dev/input/eventX, they write "code value" to a FIFO
+#   - input (main): reads the FIFO, updates the state and redraws the light's row
+#   - sender: sends the latest value to the Shelly once the keys stop (debounce)
+#   - poller: reads /status from the Arduino and redraws time, weather, Spotify
+#             and lights; it also starts the OTA update check (ota.sh) and,
+#             when nothing changes, turns the WiFi off (pause)
+# Each screen zone is redrawn only if its content changed.
+# The Home key shows the QR codes (guest WiFi and webapp); any key goes back.
 #
-# Consumi: il Kindle non va mai in sospensione, quindi conta ogni risveglio.
-# Sender e poller restano fermi su una FIFO finché non c'è qualcosa da fare
-# (kick_sender, poll_now) invece di girare a vuoto.
+# Power: the Kindle never suspends, so every wake-up counts. Sender and
+# poller block on a FIFO until there's something to do (kick_sender,
+# poll_now) instead of spinning.
 
 DIR=$(cd "$(dirname "$0")" && pwd)
-. "$DIR/lib.sh"   # configurazione (defaults.sh + config.sh) e http_get
+. "$DIR/lib.sh"   # configuration (defaults.sh + config.sh) and http_get
 
 FBINK=${PREVIEW_FBINK:-$FBINK}
 SCREEN_W=600
 SCREEN_H=800
 MARGIN=30
 
-# Zone dello schermo: y di partenza e altezza
+# Screen zones: starting y and height
 HDR_Y=0;   HDR_H=150
 WX_Y=150;  WX_H=215
 SP_Y=365;  SP_H=132
@@ -34,16 +34,16 @@ PR_Y=497;  PR_H=40
 LT_Y=540;  ROW_H=72
 LG_Y=760;  LG_H=40
 
-# Passo del debounce del sender
+# The sender's debounce step
 if have usleep; then
   tick() { usleep 250000; }
 else
   tick() { sleep 1; }
 fi
 
-# ---------- utilità ----------
+# ---------- helpers ----------
 
-# Carica le impostazioni delle luci in ID_n e NAME_n
+# Loads the light settings into ID_n and NAME_n
 load_lights() {
   local i=1 x old_ifs=$IFS
   for x in $LIGHT_IDS; do eval "ID_$i=\$x"; i=$((i + 1)); done
@@ -53,14 +53,14 @@ load_lights() {
   IFS=$old_ifs
 }
 
-# Luce scelta col joystick (1..NLIGHTS)
+# Light picked with the joystick (1..NLIGHTS)
 selected() {
   local sel=1
   [ -f "$RUN/sel" ] && read -r sel < "$RUN/sel"
   echo "$sel"
 }
 
-# Valore di una chiave dell'ultimo /status, per chi non ha fatto load_status
+# Value of a key from the last /status, for callers that didn't run load_status
 status_value() { sed -n "s/^$1=//p" "$RUN/status" 2>/dev/null; }
 
 qr_mode() {
@@ -69,8 +69,8 @@ qr_mode() {
   [ "$mode" = qr ]
 }
 
-# changed ZONA FIRMA: vero se la zona va ridisegnata. Con i QR a schermo non
-# si disegna nulla: all'uscita si ridisegna tutto.
+# changed ZONE SIGNATURE: true if the zone needs redrawing. While the QR codes
+# are on screen nothing is drawn: everything is redrawn on exit.
 changed() {
   local old=""
   qr_mode && return 1
@@ -80,7 +80,7 @@ changed() {
   return 0
 }
 
-bar() { # PIENI TOTALE
+bar() { # FILLED TOTAL
   local i=0 s=""
   while [ $i -lt "$2" ]; do
     if [ $i -lt "$1" ]; then s="${s}■"; else s="${s}□"; fi
@@ -91,19 +91,19 @@ bar() { # PIENI TOTALE
 
 mmss() { printf '%d:%02d' $(($1 / 60)) $(($1 % 60)); }
 
-# "06:30" -> minuti dalla mezzanotte (senza zeri iniziali: "08" non è ottale)
+# "06:30" -> minutes since midnight (leading zeros dropped: "08" isn't octal)
 hhmm_min() {
   local h=${1%:*} m=${1#*:}
   echo $((${h#0} * 60 + ${m#0}))
 }
 
-# Risvegli tra processi: il poller aspetta sul descrittore 5, il sender sul 6
-# (FIFO aperte da run). Fuori da run (preview) non c'è nessuno da svegliare.
+# Wake-ups between processes: the poller waits on descriptor 5, the sender on
+# 6 (FIFOs opened by run). Outside run (preview) there's nobody to wake.
 poll_now() { { echo >&5; } 2>/dev/null; }
 kick_sender() { { echo >&6; } 2>/dev/null; }
 
-# wait_poll SECONDI: aspetta il timer o un poll_now, quello che arriva prima.
-# Come in http_get, il timer chiude il suo sleep quando non serve più.
+# wait_poll SECONDS: waits for the timer or a poll_now, whichever comes first.
+# As in http_get, the timer kills its sleep once it's no longer needed.
 wait_poll() {
   local x t
   (
@@ -117,31 +117,31 @@ wait_poll() {
   kill $t 2>/dev/null
 }
 
-# ---------- disegno (FBInk) ----------
-# Si disegna sempre senza refresh (-b) e poi si aggiorna la zona intera con
-# un unico refresh parziale, così non ci sono sfarfallii intermedi.
+# ---------- drawing (FBInk) ----------
+# Everything is drawn without refresh (-b), then the whole zone is updated
+# with a single partial refresh, so there's no intermediate flicker.
 
 fb() { "$FBINK" -q "$@" >/dev/null 2>&1; }
 
 zone_clear() { fb -b -k "top=$1,left=0,width=$SCREEN_W,height=$2"; }
 zone_refresh() { fb -s "top=$1,left=0,width=$SCREEN_W,height=$2"; }
 
-# text TOP PX FONT LEFT RIGHT TESTO: una riga, troncata se non ci sta
+# text TOP PX FONT LEFT RIGHT TEXT: one line, truncated if it doesn't fit
 text() {
   fb -b -t "regular=$3,px=$2,top=$1,bottom=$((SCREEN_H - $1 - $2 * 3 / 2)),left=$4,right=$5" "$6"
 }
 
-# text_c TOP PX FONT TESTO: una riga centrata
+# text_c TOP PX FONT TEXT: one centered line
 text_c() {
   fb -b -m -t "regular=$3,px=$2,top=$1,bottom=$((SCREEN_H - $1 - $2 * 3 / 2)),left=$MARGIN,right=$MARGIN" "$4"
 }
 
-# Rettangolo pieno nero (per le linee): rect TOP LEFT WIDTH HEIGHT
+# Filled black rectangle (for lines): rect TOP LEFT WIDTH HEIGHT
 rect() { fb -b -B BLACK -k "top=$1,left=$2,width=$3,height=$4"; }
 
-# image FILE TOP: PNG centrato orizzontalmente. L'FBInk di KOReader non ha il
-# supporto per le immagini: se accanto al PNG c'è il .raw di make_qr.py (righe
-# larghe quanto lo schermo, un byte per pixel) lo copiamo nel framebuffer.
+# image FILE TOP: PNG centered horizontally. KOReader's FBInk has no image
+# support: if the PNG has make_qr.py's .raw next to it (screen-wide rows, one
+# byte per pixel) we copy that into the framebuffer.
 image() {
   local raw="${1%.png}.raw"
   if [ -z "$PREVIEW_FBINK" ] && [ -f "$raw" ] && [ -w /dev/fb0 ]; then
@@ -158,7 +158,7 @@ full_refresh() {
   draw_lights
 }
 
-# Fascia in basso con la legenda dei tasti sotto lo schermo
+# Bottom strip with the legend for the keys below the screen
 draw_legend() {
   local legend=$LEGEND_IDLE at
   [ "$(status_value sp_active)" = 1 ] && legend=$LEGEND_MUSIC
@@ -201,10 +201,10 @@ hide_qr() {
   poll_now
 }
 
-# ---------- luci ----------
+# ---------- lights ----------
 
-# La luce scelta ha una barretta nera a sinistra e, sotto il nome, i tasti
-draw_light_row() { # INDICE
+# The selected light has a black bar on the left and, under its name, the keys
+draw_light_row() { # INDEX
   local i=$1 on b name pct segs y sel=0
   read -r on < "$RUN/l${i}_on"
   read -r b < "$RUN/l${i}_b"
@@ -229,8 +229,8 @@ draw_lights() {
   while [ $i -le "$NLIGHTS" ]; do draw_light_row $i; i=$((i + 1)); done
 }
 
-# Ogni modifica incrementa l_N_ver: il sender confronta le versioni per il debounce.
-set_light() { # INDICE ACCESA LUMINOSITÀ
+# Every change bumps l_N_ver: the sender compares versions for the debounce.
+set_light() { # INDEX ON BRIGHTNESS
   local v
   echo "$2" > "$RUN/l$1_on"
   echo "$3" > "$RUN/l$1_b"
@@ -240,13 +240,13 @@ set_light() { # INDICE ACCESA LUMINOSITÀ
   kick_sender
 }
 
-adjust_light() { # INDICE DELTA
+adjust_light() { # INDEX DELTA
   local on b
   read -r on < "$RUN/l$1_on"
   read -r b < "$RUN/l$1_b"
   if [ "$on" != 1 ]; then
-    [ "$2" -lt 0 ] && return    # già spenta
-    on=1; b=$STEP               # da spenta si parte dal minimo
+    [ "$2" -lt 0 ] && return    # already off
+    on=1; b=$STEP               # from off, start at the minimum
   else
     b=$((b + $2))
     if [ $b -le 0 ]; then on=0; b=$STEP; fi
@@ -255,7 +255,7 @@ adjust_light() { # INDICE DELTA
   set_light "$1" $on $b
 }
 
-select_light() { # DELTA (+1 giù, -1 su), senza fare il giro
+select_light() { # DELTA (+1 down, -1 up), without wrapping around
   local old new
   old=$(selected); new=$((old + $1))
   [ $new -lt 1 ] && new=1
@@ -266,15 +266,15 @@ select_light() { # DELTA (+1 giù, -1 su), senza fare il giro
   draw_light_row "$new"
 }
 
-toggle_light() { # INDICE
+toggle_light() { # INDEX
   local on b
   read -r on < "$RUN/l$1_on"
   read -r b < "$RUN/l$1_b"
   set_light "$1" $((1 - on)) "$b"
 }
 
-# Tastiera: se c'è almeno una luce accesa le spegne tutte, altrimenti le
-# riaccende tutte all'ultima luminosità.
+# Keyboard key: if at least one light is on it switches them all off,
+# otherwise it switches them all back on at their last brightness.
 toggle_all() {
   local i=1 on any=0 b
   while [ $i -le "$NLIGHTS" ]; do
@@ -289,7 +289,7 @@ toggle_all() {
   done
 }
 
-send_light() { # INDICE
+send_light() { # INDEX
   local id on b
   eval "id=\$ID_$1"
   read -r on < "$RUN/l$1_on"
@@ -301,10 +301,10 @@ send_light() { # INDICE
   fi
 }
 
-# Le luci cambiate dall'app, dalla webapp o da un interruttore. Non si
-# sovrascrivono le modifiche non ancora inviate (l_N_sent lo scrive il sender)
-# né quelle fatte durante la richiesta: per questo il poller annota le
-# versioni di prima della richiesta in pv_N (light_versions).
+# Lights changed from the app, the webapp or a wall switch. Changes not yet
+# sent (the sender writes l_N_sent) and those made during the request are not
+# overwritten: that's why the poller records the versions from before the
+# request in pv_N (light_versions).
 light_versions() {
   local i=1 v
   while [ $i -le "$NLIGHTS" ]; do
@@ -313,7 +313,7 @@ light_versions() {
   done
 }
 
-light_untouched() { # INDICE
+light_untouched() { # INDEX
   local ver sent pv
   read -r ver < "$RUN/l$1_ver"
   read -r sent < "$RUN/l$1_sent"
@@ -321,28 +321,28 @@ light_untouched() { # INDICE
   [ "$ver" = "$sent" ] && [ "$ver" = "$pv" ]
 }
 
-store_light() { # INDICE ACCESA LUMINOSITÀ (luminosità 0: spenta)
+store_light() { # INDEX ON BRIGHTNESS (brightness 0: off)
   local on=$2 b=$3
   [ "$b" -gt 0 ] 2>/dev/null || { on=0; b=$STEP; }
   echo "$on" > "$RUN/l$1_on"
   echo "$b" > "$RUN/l$1_b"
 }
 
-# Un gateway aggiornato legge lui lo Shelly a ogni /status (lc_ok=1 e
-# lcN=acceso|luminosità, N canale): una richiesta del Kindle invece di quattro.
+# An up-to-date gateway reads the Shelly itself on every /status (lc_ok=1 and
+# lcN=on|brightness, N = channel): one request from the Kindle instead of four.
 lights_from_status() {
   local i=1 id st
   while [ $i -le "$NLIGHTS" ]; do
     eval "id=\$ID_$i"
     eval "st=\${S_lc$id:-}"
-    unset "S_lc$id"   # se manca nel prossimo /status non si riusa questo
+    unset "S_lc$id"   # if the next /status lacks it, this one isn't reused
     [ -n "$st" ] && light_untouched $i && store_light $i "${st%|*}" "${st#*|}"
     i=$((i + 1))
   done
   draw_lights
 }
 
-# Con un gateway vecchio si chiede allo Shelly, una luce per volta
+# With an older gateway we ask the Shelly, one light at a time
 sync_lights() {
   local i=1 id on b f="$RUN/sync.json"
   while [ $i -le "$NLIGHTS" ]; do
@@ -360,19 +360,19 @@ sync_lights() {
   draw_lights
 }
 
-# Volume: i tasti cambiano vol_target e vol_ver; il sender manda all'Arduino
-# solo il valore finale, quando i tasti si fermano (come per le luci).
+# Volume: the keys change vol_target and vol_ver; the sender sends only the
+# final value to the Arduino, once the keys stop (as for the lights).
 volume_change() { # DELTA
   local cur v now until=0
   now=$(date +%s)
   [ -f "$RUN/vol_until" ] && read -r until < "$RUN/vol_until"
   if [ "$now" -lt "$until" ]; then read -r cur < "$RUN/vol_target"; else cur=$(status_value sp_volume); fi
-  [ "${cur:--1}" -ge 0 ] 2>/dev/null || return   # il dispositivo non regola il volume
+  [ "${cur:--1}" -ge 0 ] 2>/dev/null || return   # the device has no volume control
   cur=$((cur + $1))
   [ $cur -lt 0 ] && cur=0
   [ $cur -gt 100 ] && cur=100
   echo $cur > "$RUN/vol_target"
-  echo $((now + 5)) > "$RUN/vol_until"   # per 5 s lo schermo mostra il valore scelto
+  echo $((now + 5)) > "$RUN/vol_until"   # for 5 s the screen shows the chosen value
   read -r v < "$RUN/vol_ver"; echo $((v + 1)) > "$RUN/vol_ver"
   load_status; draw_spotify
   kick_sender
@@ -384,8 +384,8 @@ send_volume() {
   http_get "http://$ARDUINO_HOST/cmd?a=vol&v=$v" 10 "$RUN/vol.out" && poll_now
 }
 
-# Dorme sulla FIFO finché un tasto non cambia luci o volume (kick_sender), poi
-# gira a tick finché non ha inviato tutto.
+# Sleeps on the FIFO until a key changes lights or volume (kick_sender), then
+# runs tick by tick until everything is sent.
 sender() {
   local i ver sent prev pending x vol_sent=0 vol_prev=0
   i=1; while [ $i -le "$NLIGHTS" ]; do eval "prev_$i=0"; i=$((i + 1)); done
@@ -401,7 +401,7 @@ sender() {
         eval "prev=\$prev_$i"
         if [ "$ver" != "$sent" ]; then
           pending=1
-          # invia solo se la versione non è cambiata dall'ultimo tick (debounce)
+          # send only if the version hasn't changed since the last tick (debounce)
           if [ "$ver" = "$prev" ]; then
             if send_light $i; then echo "$ver" > "$RUN/l${i}_sent"; else sleep 2; fi
           fi
@@ -422,9 +422,9 @@ sender() {
   done
 }
 
-# ---------- stato dall'Arduino ----------
+# ---------- state from the Arduino ----------
 
-# Ogni riga "chiave=valore" diventa la variabile S_chiave
+# Each "key=value" line becomes the variable S_key
 load_status() {
   local line k
   while IFS= read -r line; do
@@ -434,10 +434,10 @@ load_status() {
   done < "$RUN/status"
 }
 
-# Batteria del Kindle: "96%", con ⚡ col cavo collegato. Vuota se non si legge.
-# La batteria si legge da sysfs con read, senza processi. "⚡" vuol dire cavo
-# collegato (USB connesso): isCharging di powerd vale 0 quando la batteria è
-# quasi piena anche col cavo attaccato.
+# Kindle battery: "96%", with ⚡ when plugged in. Empty if it can't be read.
+# The battery is read from sysfs with read: no processes. "⚡" means the cable
+# is plugged in (USB connected): powerd's isCharging is 0 when the battery is
+# nearly full even if plugged in.
 BATT_SYS=/sys/devices/system/yoshi_battery/yoshi_battery0
 USB_SYS=/sys/devices/platform/fsl-usb2-udc
 battery_text() {
@@ -463,9 +463,9 @@ battery_current() {
   [ -n "$ma" ] && printf '%smA' "$ma"
 }
 
-# Orologio interno: l'ora dell'Arduino (S_time) tarata sull'orologio del
-# Kindle a ogni /status, così l'ora va avanti anche col WiFi spento. Si tiene
-# solo la differenza in minuti, quindi il fuso del Kindle non conta.
+# Internal clock: the Arduino's time (S_time) calibrated against the Kindle's
+# clock on every /status, so time keeps going with WiFi off. Only the
+# difference in minutes is kept, so the Kindle's time zone doesn't matter.
 clock_sync() {
   case "$S_time" in [0-9][0-9]:[0-9][0-9]) ;; *) return ;; esac
   CLOCK_OFF=$((($(hhmm_min "$S_time") - $(date +%s) / 60 % 1440 + 1440) % 1440))
@@ -478,7 +478,7 @@ clock_now() { # HH:MM
   printf '%02d:%02d' $((m / 60)) $((m % 60))
 }
 
-# La batteria si legge (due lipc-get-prop) solo quando cambia il minuto
+# The battery is read (two lipc-get-prop calls) only when the minute changes
 battery_update() {
   [ "$NOW_HM" = "${BATT_TIME:-}" ] && return
   BATT=$(battery_text)
@@ -493,13 +493,13 @@ draw_header() { # OFFLINE
   zone_clear $HDR_Y $HDR_H
   text_c $((HDR_Y + 8)) 90 "$FONT_BOLD" "$time"
   text_c $((HDR_Y + 105)) 28 "$FONT" "$date"
-  # In alto a destra, in grassetto quando va ricaricata
+  # Top right, in bold when it needs charging
   [ "${batt%\%}" -lt "$BATTERY_LOW" ] 2>/dev/null && font=$FONT_BOLD
   [ -n "$batt" ] && text $((HDR_Y + 12)) 20 "$font" $((SCREEN_W - MARGIN - 64)) $MARGIN "$batt"
   zone_refresh $HDR_Y $HDR_H
 }
 
-forecast_row() { # Y "Etichetta|Descrizione|min|max|pioggia%"
+forecast_row() { # Y "Label|Description|min|max|rain%"
   local y=$1 IFS='|'
   set -f
   set -- $2
@@ -530,7 +530,7 @@ draw_spotify() {
   local vol=${S_sp_volume:--1} now until=0
   now=$(date +%s)
   [ -f "$RUN/vol_until" ] && read -r until < "$RUN/vol_until"
-  [ "$now" -lt "$until" ] && read -r vol < "$RUN/vol_target"   # valore appena scelto coi tasti
+  [ "$now" -lt "$until" ] && read -r vol < "$RUN/vol_target"   # value just chosen with the keys
   if [ "$S_sp_ok" != 1 ]; then state="Spotify non raggiungibile"
   elif [ "$S_sp_active" != 1 ]; then state="Spotify: a casa non suona niente"
   elif [ "$S_sp_playing" = 1 ]; then state="▶  $S_sp_device"
@@ -546,8 +546,8 @@ draw_spotify() {
     zone_refresh $SP_Y $SP_H
   fi
 
-  # La barra di avanzamento ha una zona sua: si aggiorna solo quando avanza
-  # di un segmento, non a ogni lettura.
+  # The progress bar has a zone of its own: it's updated only when it advances
+  # by one segment, not on every read.
   local dur=${S_sp_duration:-0} segs=0 line=""
   if [ "$S_sp_active" = 1 ] && [ "$dur" -gt 0 ]; then
     segs=$((${S_sp_progress:-0} * 20 / dur))
@@ -558,15 +558,15 @@ draw_spotify() {
     [ -n "$line" ] && text $((PR_Y + 6)) 22 "$FONT" $MARGIN $MARGIN "$line"
     zone_refresh $PR_Y $PR_H
   fi
-  draw_legend   # la legenda dipende dalla musica
+  draw_legend   # the legend depends on the music
 }
 
-# ---------- pausa ----------
-# Se per IDLE_MINUTES non cambia niente (nessun tasto, stesse luci, stessa
-# musica e nessun brano che suona), il pannello va in pausa: WiFi spento,
-# l'ora va avanti con l'orologio interno e ogni SLEEP_CHECK_MINUTES si
-# riaccende il WiFi per un /status. Se è cambiato qualcosa si resta svegli,
-# altrimenti si torna in pausa. Un tasto sveglia subito, in carica mai pausa.
+# ---------- pause ----------
+# If nothing changes for IDLE_MINUTES (no key, same lights, same music and no
+# track playing), the panel pauses: WiFi off, the time keeps going on the
+# internal clock, and every SLEEP_CHECK_MINUTES the WiFi comes back on for a
+# /status. If something changed the panel stays awake, otherwise it pauses
+# again. A key wakes it right away; while charging it never pauses.
 
 paused() {
   local mode=""
@@ -574,7 +574,7 @@ paused() {
   [ "$mode" = pause ]
 }
 
-wifi() { # 0|1: spegne o accende il WiFi; all'accensione aspetta la connessione
+wifi() { # 0|1: turns WiFi off or on; when turning on, waits for the connection
   local i=0
   have lipc-set-prop || return 0
   lipc-set-prop com.lab126.cmd wirelessEnable "$1" 2>/dev/null
@@ -584,7 +584,7 @@ wifi() { # 0|1: spegne o accende il WiFi; all'accensione aspetta la connessione
   done
 }
 
-# Chiamata dai tasti in pausa: il primo tasto sveglia soltanto, come coi QR
+# Called by keys while paused: the first key only wakes, as with the QR codes
 wake_up() {
   zone_clear $LG_Y $LG_H
   text_c $((LG_Y + 10)) 18 "$FONT" "Riconnessione…"
@@ -592,7 +592,7 @@ wake_up() {
   poll_now
 }
 
-# Firma di quello che conta per la pausa: se cambia, il pannello resta sveglio
+# Signature of what matters for the pause: if it changes, the panel stays awake
 activity() {
   local i=1 on b s="$S_sp_active|$S_sp_playing|$S_sp_track|$S_sp_device"
   while [ $i -le "$NLIGHTS" ]; do
@@ -603,14 +603,14 @@ activity() {
   printf '%s' "$s"
 }
 
-# Si resta in pausa fino al prossimo controllo, a un tasto, al cavo di
-# ricarica o alla mezzanotte (la data va riletta). Il WiFi si spegne qui.
+# Stays paused until the next check, a key, the charging cable or midnight
+# (the date must be re-read). WiFi is turned off here.
 pause_wait() {
   local check_at sec
   if ! paused; then
     echo pause > "$RUN/mode"
-    battery_log pausa
-    # Così il gateway non segnala il Kindle come spento (kindleOnline)
+    battery_log pause
+    # So the gateway doesn't report the Kindle as offline (kindleOnline)
     http_get "http://$ARDUINO_HOST/status?v=$VERSION&sleep=$((SLEEP_CHECK_MINUTES * 60 + 180))" 8 "$RUN/status.pause"
   fi
   clock_now > "$RUN/paused_at"
@@ -623,7 +623,7 @@ pause_wait() {
     [ -e "$RUN/key_seen" ] && break
     NOW_HM=$(clock_now)
     [ "$NOW_HM" = 00:00 ] && break
-    [ "$(date +%s)" -ge $((check_at - 30)) ] && break   # i risvegli sono al minuto
+    [ "$(date +%s)" -ge $((check_at - 30)) ] && break   # wake-ups happen on the minute
     battery_update
     [ "$CHARGING" = 1 ] && break
     draw_header 0
@@ -634,14 +634,14 @@ pause_wait() {
 pause_end() {
   paused || return 0
   echo dash > "$RUN/mode"
-  battery_log sveglio
+  battery_log awake
   draw_legend
 }
 
-# ---------- registro della batteria ----------
-# battery.log: "secondi_epoch ora batteria corrente [evento]", per misurare i consumi.
+# ---------- battery log ----------
+# battery.log: "epoch_seconds time battery current [event]", to measure consumption.
 
-battery_log() { # [EVENTO]
+battery_log() { # [EVENT]
   [ "${BATTERY_LOG_MINUTES:-0}" -gt 0 ] && [ -z "$PREVIEW_FBINK" ] || return 0
   echo "$(date +%s) $(clock_now) $(battery_text) $(battery_current) $1" >> "$DIR/battery.log"
 }
@@ -653,9 +653,9 @@ battery_log_trim() {
 
 # ---------- poller ----------
 
-# Quanto aspettare prima del prossimo /status: con la musica o in carica
-# POLL_SECONDS, altrimenti fino allo scatto del minuto (più un paio di
-# secondi di margine, l'orologio del Kindle non è quello dell'Arduino).
+# How long to wait before the next /status: with music or while charging
+# POLL_SECONDS, otherwise until the minute ticks over (plus a couple of
+# seconds of margin: the Kindle's clock isn't the Arduino's).
 next_poll() {
   local s since left
   if [ "$S_sp_playing" = 1 ] || [ "$CHARGING" = 1 ]; then s=$POLL_SECONDS
@@ -673,7 +673,7 @@ poller() {
   local fails=0 since now ota_req="" act="" sig idle_since pause
   local ota_at full_at log_at
   now=$(date +%s)
-  ota_at=$((now + 120))   # primo controllo poco dopo l'avvio
+  ota_at=$((now + 120))   # first check shortly after startup
   full_at=$((now + FULL_REFRESH_MINUTES * 60))
   log_at=$now
   idle_since=$now
@@ -707,7 +707,7 @@ poller() {
       sig=$(activity)
       [ "$sig" != "$act" ] && act=$sig && idle_since=$now
     fi
-    if [ -e "$RUN/key_seen" ]; then   # lo crea handle_key a ogni tasto
+    if [ -e "$RUN/key_seen" ]; then   # created by handle_key on every key
       rm -f "$RUN/key_seen"
       idle_since=$now
     fi
@@ -724,14 +724,14 @@ poller() {
       draw_weather
       draw_spotify
     fi
-    : > "$RUN/alive"   # per ota.sh: il ciclo principale gira
+    : > "$RUN/alive"   # for ota.sh: the main loop is running
 
     if [ "${BATTERY_LOG_MINUTES:-0}" -gt 0 ] && [ $now -ge $log_at ]; then
       battery_log
       log_at=$((now + BATTERY_LOG_MINUTES * 60))
     fi
 
-    # Aggiornamenti: periodici, o chiesti dalla webapp (ota_req cambia)
+    # Updates: periodic, or requested from the webapp (ota_req changes)
     if [ -n "$ota_req" ] && [ "${S_ota_req:-}" != "$ota_req" ]; then ota_at=$now; fi
     ota_req=${S_ota_req:-0}
     if [ "$OTA_ENABLED" = 1 ] && [ "$now" -ge "$ota_at" ]; then
@@ -742,7 +742,7 @@ poller() {
     if [ $pause = 1 ]; then
       pause_wait
     else
-      # Attesa interrompibile: dopo un comando Spotify si rilegge subito (poll_now)
+      # Interruptible wait: after a Spotify command we re-read right away (poll_now)
       wait_poll "$(next_poll)"
     fi
   done
@@ -750,10 +750,10 @@ poller() {
 
 # ---------- input ----------
 
-# Legge gli eventi da un device. struct input_event su ARM a 32 bit, 16 byte:
-# sec(4) usec(4) type(2) code(2) value(4). Il file resta aperto sul descrittore 3,
-# quindi tra una lettura e l'altra non si perdono eventi.
-# Il Kindle 5 non ha od: hexdump con questo formato stampa le stesse 8 parole.
+# Reads events from a device. struct input_event on 32-bit ARM, 16 bytes:
+# sec(4) usec(4) type(2) code(2) value(4). The file stays open on descriptor 3,
+# so no events are lost between reads.
+# The Kindle 5 has no od: hexdump with this format prints the same 8 words.
 u16dump() {
   if have od; then od -An -tu2 -v; else hexdump -v -e '8/2 "%u " "\n"'; fi
 }
@@ -763,7 +763,7 @@ key_reader() { # DEVICE
   while true; do
     set -- $(dd bs=16 count=1 <&3 2>/dev/null | u16dump)
     [ $# -ge 7 ] || { sleep 1; continue; }
-    [ "$5" = 1 ] && echo "$6 $7"   # solo EV_KEY: codice, valore (1 premuto, 2 ripetizione, 0 rilascio)
+    [ "$5" = 1 ] && echo "$6 $7"   # EV_KEY only: code, value (1 press, 2 repeat, 0 release)
   done
 }
 
@@ -771,21 +771,21 @@ spotify_cmd() {
   ( http_get "http://$ARDUINO_HOST/cmd?a=$1" 10 "$RUN/cmd.out"; poll_now ) &
 }
 
-# La musica suona a casa? (per i tasti ai lati)
+# Is music playing at home? (for the side keys)
 music_at_home() { [ "$(status_value sp_active)" = 1 ]; }
 
-handle_key() { # CODICE VALORE (1 premuto, 2 tenuto premuto)
+handle_key() { # CODE VALUE (1 pressed, 2 held down)
   [ "$2" = 0 ] && return
-  : > "$RUN/key_seen"        # per la pausa: qualcuno usa il pannello
-  if paused; then            # in pausa un tasto sveglia soltanto
+  : > "$RUN/key_seen"        # for the pause: someone is using the panel
+  if paused; then            # while paused a key only wakes the panel
     [ "$2" = 1 ] && wake_up
     return
   fi
-  if qr_mode; then           # con i QR a schermo un tasto qualsiasi torna indietro
+  if qr_mode; then           # with the QR codes on screen any key goes back
     [ "$2" = 1 ] && hide_qr
     return
   fi
-  # Tenendo premuto si ripetono luminosità e volume
+  # Holding a key repeats brightness and volume
   case "$1" in
     "$KEY_LEFT") adjust_light "$(selected)" "-$STEP"; return ;;
     "$KEY_RIGHT") adjust_light "$(selected)" "$STEP"; return ;;
@@ -806,7 +806,7 @@ handle_key() { # CODICE VALORE (1 premuto, 2 tenuto premuto)
   esac
 }
 
-# ---------- comandi ----------
+# ---------- commands ----------
 
 run() {
   local i=1 pids="" dev
@@ -823,12 +823,12 @@ run() {
 
   /etc/init.d/framework stop >/dev/null 2>&1
   lipc-set-prop com.lab126.powerd preventScreenSaver 1
-  wifi 1   # se il pannello è stato fermato in pausa, il WiFi è ancora spento
+  wifi 1   # if the panel was stopped while paused, WiFi is still off
   sleep 2
   full_refresh
 
-  # FIFO aperte in lettura e scrittura qui, prima dei figli: chi scrive non
-  # si blocca mai, anche se il lettore non è ancora partito
+  # FIFOs opened read-write here, before the children: writers never block,
+  # even if the reader hasn't started yet
   mkfifo "$RUN/keys" "$RUN/poll" "$RUN/send"
   exec 4<> "$RUN/keys" 5<> "$RUN/poll" 6<> "$RUN/send"
   poller & pids="$pids $!"
@@ -843,23 +843,23 @@ run() {
   done
 }
 
-# Lancia ota.sh staccato dal pannello, che durante l'aggiornamento viene riavviato
+# Starts ota.sh detached from the panel, which gets restarted during the update
 ota_start() {
   ( trap '' HUP; exec sh "$DIR/ota.sh" update ) >> /tmp/dashboard-ota.log 2>&1 &
 }
 
 start() {
   if [ -f "$RUN/pid" ] && kill -0 "$(cat "$RUN/pid")" 2>/dev/null; then
-    echo "Il pannello è già in esecuzione"
+    echo "The panel is already running"
     return 1
   fi
   ( trap '' HUP; exec sh "$DIR/dashboard.sh" run ) > /tmp/dashboard.log 2>&1 &
-  echo "Pannello avviato (log in /tmp/dashboard.log)"
+  echo "Panel started (log in /tmp/dashboard.log)"
 }
 
-# Uccide il processo principale e poi tutti gli altri "dashboard.sh run":
-# uccidendo solo il principale, a ogni riavvio restavano vivi i vecchi
-# lettori dei tasti. Il ps del Kindle è quello di procps, quindi -ef funziona.
+# Kills the main process and then every other "dashboard.sh run" process:
+# killing only the main pid left the old key readers alive at every restart.
+# The Kindle's ps comes from procps, so -ef works.
 kill_panel() {
   local p
   [ -f "$RUN/pid" ] && kill "$(cat "$RUN/pid")" 2>/dev/null
@@ -872,25 +872,25 @@ kill_panel() {
 
 stop() {
   kill_panel
-  lipc-set-prop com.lab126.cmd wirelessEnable 1   # fermato in pausa: il WiFi era spento
+  lipc-set-prop com.lab126.cmd wirelessEnable 1   # stopped while paused: WiFi was off
   lipc-set-prop com.lab126.powerd preventScreenSaver 0
   /etc/init.d/framework start >/dev/null 2>&1 &
-  echo "Pannello fermato, interfaccia Kindle riavviata"
+  echo "Panel stopped, Kindle UI restarted"
 }
 
 keytest() {
   local dev
-  echo "Device di input:"
+  echo "Input devices:"
   grep '^[NH]:' /proc/bus/input/devices
   echo
-  echo "Premi i tasti (Ctrl+C per uscire). Formato: device codice valore"
+  echo "Press the keys (Ctrl+C to quit). Format: device code value"
   for dev in /dev/input/event*; do
     ( key_reader "$dev" | while read -r c v; do echo "$dev $c $v"; done ) &
   done
   wait
 }
 
-# preview FILE_STATO "acc:lum acc:lum ..." [qr]: disegna una sola schermata
+# preview STATUS_FILE "on:bri on:bri ..." [qr]: draws a single screen
 preview() {
   local i=1 l
   PREVIEW_BATTERY=${PREVIEW_BATTERY:-87}
@@ -914,11 +914,11 @@ preview() {
   draw_spotify
 }
 
-# ---------- avvio al boot ----------
-# Installa (on) o toglie (off) /etc/init.d/dashboard, lanciato al boot come
-# S99dashboard dopo l'interfaccia Kindle. Lo script non blocca il boot: in
-# background aspetta il WiFi, poi avvia il pannello. Per saltare un avvio
-# senza toglierlo basta creare $DIR/NO_AUTOSTART.
+# ---------- start at boot ----------
+# Installs (on) or removes (off) /etc/init.d/dashboard, run at boot as
+# S99dashboard after the Kindle UI. The script doesn't block the boot: in the
+# background it waits for WiFi, then starts the panel. To skip one start
+# without removing it, create $DIR/NO_AUTOSTART.
 INIT_SCRIPT=/etc/init.d/dashboard
 INIT_LINK=/etc/rc5.d/S99dashboard
 
@@ -928,7 +928,7 @@ autostart() { # on|off
   if [ "$1" = on ]; then
     cat > "$INIT_SCRIPT" <<INIT
 #!/bin/sh
-# Pannello domestico (kindle-homeview): creato da dashboard.sh autostart on
+# Home panel (kindle-homeview): created by dashboard.sh autostart on
 [ "\$1" = start ] || exit 0
 [ -f "$DIR/NO_AUTOSTART" ] && exit 0
 [ -f "$DIR/dashboard.sh" ] || exit 0
@@ -938,7 +938,7 @@ autostart() { # on|off
     [ "\$(lipc-get-prop com.lab126.wifid cmState 2>/dev/null)" = CONNECTED ] && break
     sleep 2; i=\$((i + 2))
   done
-  sleep 15   # lasciamo finire l'avvio dell'interfaccia Kindle
+  sleep 15   # let the Kindle UI finish starting
   sh "$DIR/dashboard.sh" start
 ) > /tmp/dashboard-boot.log 2>&1 &
 exit 0
@@ -948,18 +948,18 @@ INIT
   fi
   sync
   mount -o ro,remount /
-  if [ "$1" = on ]; then echo "Avvio al boot attivato"; else echo "Avvio al boot disattivato"; fi
+  if [ "$1" = on ]; then echo "Start at boot enabled"; else echo "Start at boot disabled"; fi
 }
 
 case "$1" in
   start) start ;;
   stop) stop ;;
-  restart) kill_panel; start ;;            # senza riaccendere l'interfaccia Kindle
-  update) sh "$DIR/ota.sh" update ;;       # controllo OTA a mano, con l'output a schermo
+  restart) kill_panel; start ;;            # without bringing back the Kindle UI
+  update) sh "$DIR/ota.sh" update ;;       # manual OTA check, with output on the terminal
   run) run ;;
   keytest) keytest ;;
   autostart) autostart "$2" ;;
   preview) preview "$2" "$3" "$4" ;;
-  *) echo "Uso: sh $0 start|stop|restart|update|keytest|autostart on|off"; exit 1 ;;
+  *) echo "Usage: sh $0 start|stop|restart|update|keytest|autostart on|off"; exit 1 ;;
 esac
 # ota:end

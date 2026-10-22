@@ -1,7 +1,15 @@
+# Local configuration and secrets
 arduino/kindle_gateway/arduino_secrets.h
 arduino/kindle_gateway/home_config.h
+kindle/config.sh
+kindle/qr/
+
+# Third-party files you copy in yourself (see README)
+kindle/fonts/
+kindle/bin/
+
+# Generated
 /preview.png
 /preview-qr.png
-kindle/qr/
 __pycache__/
-kindle/config.sh
+.venv/
