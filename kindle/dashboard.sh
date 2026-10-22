@@ -8,11 +8,15 @@
 #   - lettori tasti: uno per /dev/input/eventX, scrivono "codice valore" in una FIFO
 #   - input (principale): legge la FIFO, aggiorna lo stato e ridisegna la riga della luce
 #   - sender: invia allo Shelly l'ultimo valore quando i tasti si fermano (debounce)
-#             e rilegge periodicamente lo stato delle luci
-#   - poller: legge /status dall'Arduino e ridisegna ora, meteo e Spotify;
-#             lancia anche il controllo degli aggiornamenti OTA (ota.sh)
+#   - poller: legge /status dall'Arduino e ridisegna ora, meteo, Spotify e luci;
+#             lancia anche il controllo degli aggiornamenti OTA (ota.sh) e,
+#             quando non cambia niente, spegne il WiFi (pausa)
 # Ogni zona dello schermo viene ridisegnata solo se il suo contenuto è cambiato.
 # Il tasto Home mostra i QR (WiFi ospiti e webapp); un tasto qualsiasi torna indietro.
+#
+# Consumi: il Kindle non va mai in sospensione, quindi conta ogni risveglio.
+# Sender e poller restano fermi su una FIFO finché non c'è qualcosa da fare
+# (kick_sender, poll_now) invece di girare a vuoto.
 
 DIR=$(cd "$(dirname "$0")" && pwd)
 . "$DIR/lib.sh"   # configurazione (defaults.sh + config.sh) e http_get
@@ -30,12 +34,11 @@ PR_Y=497;  PR_H=40
 LT_Y=540;  ROW_H=72
 LG_Y=760;  LG_H=40
 
+# Passo del debounce del sender
 if have usleep; then
   tick() { usleep 250000; }
-  TICKS_PER_SEC=4
 else
   tick() { sleep 1; }
-  TICKS_PER_SEC=1
 fi
 
 # ---------- utilità ----------
@@ -88,6 +91,32 @@ bar() { # PIENI TOTALE
 
 mmss() { printf '%d:%02d' $(($1 / 60)) $(($1 % 60)); }
 
+# "06:30" -> minuti dalla mezzanotte (senza zeri iniziali: "08" non è ottale)
+hhmm_min() {
+  local h=${1%:*} m=${1#*:}
+  echo $((${h#0} * 60 + ${m#0}))
+}
+
+# Risvegli tra processi: il poller aspetta sul descrittore 5, il sender sul 6
+# (FIFO aperte da run). Fuori da run (preview) non c'è nessuno da svegliare.
+poll_now() { { echo >&5; } 2>/dev/null; }
+kick_sender() { { echo >&6; } 2>/dev/null; }
+
+# wait_poll SECONDI: aspetta il timer o un poll_now, quello che arriva prima.
+# Come in http_get, il timer chiude il suo sleep quando non serve più.
+wait_poll() {
+  local x t
+  (
+    sleep "$1" &
+    s=$!
+    trap 'kill $s 2>/dev/null; exit 0' TERM
+    wait $s && echo >&5
+  ) >/dev/null 2>&1 &
+  t=$!
+  read -r x <&5
+  kill $t 2>/dev/null
+}
+
 # ---------- disegno (FBInk) ----------
 # Si disegna sempre senza refresh (-b) e poi si aggiorna la zona intera con
 # un unico refresh parziale, così non ci sono sfarfallii intermedi.
@@ -131,8 +160,12 @@ full_refresh() {
 
 # Fascia in basso con la legenda dei tasti sotto lo schermo
 draw_legend() {
-  local legend=$LEGEND_IDLE
+  local legend=$LEGEND_IDLE at
   [ "$(status_value sp_active)" = 1 ] && legend=$LEGEND_MUSIC
+  if paused; then
+    read -r at < "$RUN/paused_at" 2>/dev/null
+    legend="In pausa, dati delle $at  ·  $LEGEND_PAUSE"
+  fi
   changed legend "$legend" || return 0
   zone_clear $LG_Y $LG_H
   rect $LG_Y $MARGIN $((SCREEN_W - 2 * MARGIN)) 2
@@ -165,7 +198,7 @@ show_qr() {
 hide_qr() {
   echo dash > "$RUN/mode"
   full_refresh
-  touch "$RUN/poll_now"
+  poll_now
 }
 
 # ---------- luci ----------
@@ -204,6 +237,7 @@ set_light() { # INDICE ACCESA LUMINOSITÀ
   read -r v < "$RUN/l$1_ver"
   echo $((v + 1)) > "$RUN/l$1_ver"
   draw_light_row "$1"
+  kick_sender
 }
 
 adjust_light() { # INDICE DELTA
@@ -267,24 +301,58 @@ send_light() { # INDICE
   fi
 }
 
-# Rilegge lo stato dallo Shelly (se le luci sono state cambiate dall'app o
-# da un interruttore), senza sovrascrivere modifiche fatte nel frattempo né
-# quelle non ancora inviate (sent_N è del sender, che chiama questa funzione).
-sync_lights() {
-  local i=1 id on b ver ver2 sent f="$RUN/sync.json"
+# Le luci cambiate dall'app, dalla webapp o da un interruttore. Non si
+# sovrascrivono le modifiche non ancora inviate (l_N_sent lo scrive il sender)
+# né quelle fatte durante la richiesta: per questo il poller annota le
+# versioni di prima della richiesta in pv_N (light_versions).
+light_versions() {
+  local i=1 v
+  while [ $i -le "$NLIGHTS" ]; do
+    read -r v < "$RUN/l${i}_ver"; eval "pv_$i=\$v"
+    i=$((i + 1))
+  done
+}
+
+light_untouched() { # INDICE
+  local ver sent pv
+  read -r ver < "$RUN/l$1_ver"
+  read -r sent < "$RUN/l$1_sent"
+  eval "pv=\$pv_$1"
+  [ "$ver" = "$sent" ] && [ "$ver" = "$pv" ]
+}
+
+store_light() { # INDICE ACCESA LUMINOSITÀ (luminosità 0: spenta)
+  local on=$2 b=$3
+  [ "$b" -gt 0 ] 2>/dev/null || { on=0; b=$STEP; }
+  echo "$on" > "$RUN/l$1_on"
+  echo "$b" > "$RUN/l$1_b"
+}
+
+# Un gateway aggiornato legge lui lo Shelly a ogni /status (lc_ok=1 e
+# lcN=acceso|luminosità, N canale): una richiesta del Kindle invece di quattro.
+lights_from_status() {
+  local i=1 id st
   while [ $i -le "$NLIGHTS" ]; do
     eval "id=\$ID_$i"
-    read -r ver < "$RUN/l${i}_ver"
-    eval "sent=\${sent_$i:-\$ver}"
-    if [ "$ver" = "$sent" ] && http_get "http://$SHELLY_HOST/rpc/Light.GetStatus?id=$id" 3 "$f"; then
+    eval "st=\${S_lc$id:-}"
+    unset "S_lc$id"   # se manca nel prossimo /status non si riusa questo
+    [ -n "$st" ] && light_untouched $i && store_light $i "${st%|*}" "${st#*|}"
+    i=$((i + 1))
+  done
+  draw_lights
+}
+
+# Con un gateway vecchio si chiede allo Shelly, una luce per volta
+sync_lights() {
+  local i=1 id on b f="$RUN/sync.json"
+  while [ $i -le "$NLIGHTS" ]; do
+    eval "id=\$ID_$i"
+    if light_untouched $i && http_get "http://$SHELLY_HOST/rpc/Light.GetStatus?id=$id" 3 "$f"; then
       on=$(sed -n 's/.*"output":\([a-z]*\).*/\1/p' "$f")
       b=$(sed -n 's/.*"brightness":\([0-9]*\).*/\1/p' "$f")
-      read -r ver2 < "$RUN/l${i}_ver"
-      if [ -n "$b" ] && [ "$ver" = "$ver2" ]; then
-        if [ "$on" = true ] && [ "$b" -gt 0 ]; then on=1; else on=0; fi
-        [ "$b" -gt 0 ] || b=$STEP
-        echo "$on" > "$RUN/l${i}_on"
-        echo "$b" > "$RUN/l${i}_b"
+      if [ -n "$b" ] && light_untouched $i; then
+        if [ "$on" = true ]; then on=1; else on=0; fi
+        store_light $i $on "$b"
       fi
     fi
     i=$((i + 1))
@@ -307,44 +375,50 @@ volume_change() { # DELTA
   echo $((now + 5)) > "$RUN/vol_until"   # per 5 s lo schermo mostra il valore scelto
   read -r v < "$RUN/vol_ver"; echo $((v + 1)) > "$RUN/vol_ver"
   load_status; draw_spotify
+  kick_sender
 }
 
 send_volume() {
   local v
   read -r v < "$RUN/vol_target"
-  http_get "http://$ARDUINO_HOST/cmd?a=vol&v=$v" 10 "$RUN/vol.out" && touch "$RUN/poll_now"
+  http_get "http://$ARDUINO_HOST/cmd?a=vol&v=$v" 10 "$RUN/vol.out" && poll_now
 }
 
+# Dorme sulla FIFO finché un tasto non cambia luci o volume (kick_sender), poi
+# gira a tick finché non ha inviato tutto.
 sender() {
-  local i ver sent prev pending sync_left=$((SHELLY_SYNC_SECONDS * TICKS_PER_SEC))
-  local vol_sent=0 vol_prev=0
-  i=1; while [ $i -le "$NLIGHTS" ]; do eval "sent_$i=0 prev_$i=0"; i=$((i + 1)); done
-  while true; do
-    pending=0
-    i=1
-    while [ $i -le "$NLIGHTS" ]; do
-      read -r ver < "$RUN/l${i}_ver"
-      eval "sent=\$sent_$i prev=\$prev_$i"
-      if [ "$ver" != "$sent" ]; then
+  local i ver sent prev pending x vol_sent=0 vol_prev=0
+  i=1; while [ $i -le "$NLIGHTS" ]; do eval "prev_$i=0"; i=$((i + 1)); done
+  while read -r x <&6; do
+    pending=1
+    while [ $pending = 1 ]; do
+      tick
+      pending=0
+      i=1
+      while [ $i -le "$NLIGHTS" ]; do
+        read -r ver < "$RUN/l${i}_ver"
+        read -r sent < "$RUN/l${i}_sent"
+        eval "prev=\$prev_$i"
+        if [ "$ver" != "$sent" ]; then
+          pending=1
+          # invia solo se la versione non è cambiata dall'ultimo tick (debounce)
+          if [ "$ver" = "$prev" ]; then
+            if send_light $i; then echo "$ver" > "$RUN/l${i}_sent"; else sleep 2; fi
+          fi
+        fi
+        eval "prev_$i=\$ver"
+        i=$((i + 1))
+      done
+      read -r ver < "$RUN/vol_ver"
+      if [ "$ver" != "$vol_sent" ]; then
         pending=1
-        # invia solo se la versione non è cambiata dall'ultimo tick (debounce)
-        if [ "$ver" = "$prev" ] && send_light $i; then eval "sent_$i=\$ver"; fi
+        if [ "$ver" = "$vol_prev" ]; then
+          send_volume
+          vol_sent=$ver
+        fi
       fi
-      eval "prev_$i=\$ver"
-      i=$((i + 1))
+      vol_prev=$ver
     done
-    read -r ver < "$RUN/vol_ver"
-    if [ "$ver" != "$vol_sent" ] && [ "$ver" = "$vol_prev" ]; then
-      send_volume
-      vol_sent=$ver
-    fi
-    vol_prev=$ver
-    sync_left=$((sync_left - 1))
-    if [ $sync_left -le 0 ] && [ $pending = 0 ]; then
-      sync_lights
-      sync_left=$((SHELLY_SYNC_SECONDS * TICKS_PER_SEC))
-    fi
-    tick
   done
 }
 
@@ -374,13 +448,35 @@ battery_text() {
   printf '%s%%' "$level"
 }
 
+# Orologio interno: l'ora dell'Arduino (S_time) tarata sull'orologio del
+# Kindle a ogni /status, così l'ora va avanti anche col WiFi spento. Si tiene
+# solo la differenza in minuti, quindi il fuso del Kindle non conta.
+clock_sync() {
+  case "$S_time" in [0-9][0-9]:[0-9][0-9]) ;; *) return ;; esac
+  CLOCK_OFF=$((($(hhmm_min "$S_time") - $(date +%s) / 60 % 1440 + 1440) % 1440))
+}
+
+clock_now() { # HH:MM
+  local m
+  [ -n "${CLOCK_OFF:-}" ] || { printf '%s' "$S_time"; return; }
+  m=$((($(date +%s) / 60 + CLOCK_OFF) % 1440))
+  printf '%02d:%02d' $((m / 60)) $((m % 60))
+}
+
+# La batteria si legge (due lipc-get-prop) solo quando cambia il minuto
+battery_update() {
+  [ "$NOW_HM" = "${BATT_TIME:-}" ] && return
+  BATT=$(battery_text)
+  BATT_TIME=$NOW_HM
+  case "$BATT" in ⚡*) CHARGING=1 ;; *) CHARGING=0 ;; esac
+}
+
 draw_header() { # OFFLINE
-  local date=$S_date batt font=$FONT
-  batt=$(battery_text)
+  local date=$S_date batt=$BATT font=$FONT time=${NOW_HM:-$S_time}
   [ "$1" = 1 ] && date="Gateway non raggiungibile"
-  changed header "$S_time|$date|$batt" || return 0
+  changed header "$time|$date|$batt" || return 0
   zone_clear $HDR_Y $HDR_H
-  text_c $((HDR_Y + 8)) 90 "$FONT_BOLD" "$S_time"
+  text_c $((HDR_Y + 8)) 90 "$FONT_BOLD" "$time"
   text_c $((HDR_Y + 105)) 28 "$FONT" "$date"
   # In alto a destra, in grassetto quando va ricaricata
   [ "${batt%\%}" -lt "$BATTERY_LOW" ] 2>/dev/null && font=$FONT_BOLD
@@ -450,11 +546,125 @@ draw_spotify() {
   draw_legend   # la legenda dipende dalla musica
 }
 
-poller() {
-  local fails=0 n polls=0 since now ota_req=""
-  local polls_per_full=$((FULL_REFRESH_MINUTES * 60 / POLL_SECONDS))
-  local ota_at=$(($(date +%s) + 120))   # primo controllo poco dopo l'avvio
+# ---------- pausa ----------
+# Se per IDLE_MINUTES non cambia niente (nessun tasto, stesse luci, stessa
+# musica e nessun brano che suona), il pannello va in pausa: WiFi spento,
+# l'ora va avanti con l'orologio interno e ogni SLEEP_CHECK_MINUTES si
+# riaccende il WiFi per un /status. Se è cambiato qualcosa si resta svegli,
+# altrimenti si torna in pausa. Un tasto sveglia subito, in carica mai pausa.
+
+paused() {
+  local mode=""
+  [ -f "$RUN/mode" ] && read -r mode < "$RUN/mode"
+  [ "$mode" = pause ]
+}
+
+wifi() { # 0|1: spegne o accende il WiFi; all'accensione aspetta la connessione
+  local i=0
+  have lipc-set-prop || return 0
+  lipc-set-prop com.lab126.cmd wirelessEnable "$1" 2>/dev/null
+  [ "$1" = 1 ] || return 0
+  while [ $i -lt 60 ] && [ "$(lipc-get-prop com.lab126.wifid cmState 2>/dev/null)" != CONNECTED ]; do
+    sleep 1; i=$((i + 1))
+  done
+}
+
+# Chiamata dai tasti in pausa: il primo tasto sveglia soltanto, come coi QR
+wake_up() {
+  zone_clear $LG_Y $LG_H
+  text_c $((LG_Y + 10)) 18 "$FONT" "Riconnessione…"
+  zone_refresh $LG_Y $LG_H
+  poll_now
+}
+
+# Firma di quello che conta per la pausa: se cambia, il pannello resta sveglio
+activity() {
+  local i=1 on b s="$S_sp_active|$S_sp_playing|$S_sp_track|$S_sp_device"
+  while [ $i -le "$NLIGHTS" ]; do
+    read -r on < "$RUN/l${i}_on"; read -r b < "$RUN/l${i}_b"
+    s="$s|$on:$b"
+    i=$((i + 1))
+  done
+  printf '%s' "$s"
+}
+
+# Si resta in pausa fino al prossimo controllo, a un tasto, al cavo di
+# ricarica o alla mezzanotte (la data va riletta). Il WiFi si spegne qui.
+pause_wait() {
+  local check_at sec
+  if ! paused; then
+    echo pause > "$RUN/mode"
+    battery_log pausa
+    # Così il gateway non segnala il Kindle come spento (kindleOnline)
+    http_get "http://$ARDUINO_HOST/status?v=$VERSION&sleep=$((SLEEP_CHECK_MINUTES * 60 + 180))" 8 "$RUN/status.pause"
+  fi
+  clock_now > "$RUN/paused_at"
+  draw_legend
+  wifi 0
+  check_at=$(($(date +%s) + SLEEP_CHECK_MINUTES * 60))
   while true; do
+    sec=$(date +%S | sed 's/^0//')
+    wait_poll $((62 - sec))
+    [ -e "$RUN/key_seen" ] && break
+    NOW_HM=$(clock_now)
+    [ "$NOW_HM" = 00:00 ] && break
+    [ "$(date +%s)" -ge $((check_at - 30)) ] && break   # i risvegli sono al minuto
+    battery_update
+    [ "$CHARGING" = 1 ] && break
+    draw_header 0
+  done
+  wifi 1
+}
+
+pause_end() {
+  paused || return 0
+  echo dash > "$RUN/mode"
+  battery_log sveglio
+  draw_legend
+}
+
+# ---------- registro della batteria ----------
+# battery.log: "secondi_epoch ora batteria [evento]", per misurare i consumi.
+
+battery_log() { # [EVENTO]
+  [ "${BATTERY_LOG_MINUTES:-0}" -gt 0 ] && [ -z "$PREVIEW_FBINK" ] || return 0
+  echo "$(date +%s) $(clock_now) $(battery_text) $1" >> "$DIR/battery.log"
+}
+
+battery_log_trim() {
+  local f="$DIR/battery.log"
+  [ -f "$f" ] && [ "$(wc -l < "$f")" -gt 3000 ] && tail -n 2000 "$f" > "$f.new" && mv "$f.new" "$f"
+}
+
+# ---------- poller ----------
+
+# Quanto aspettare prima del prossimo /status: con la musica o in carica
+# POLL_SECONDS, altrimenti fino allo scatto del minuto (più un paio di
+# secondi di margine, l'orologio del Kindle non è quello dell'Arduino).
+next_poll() {
+  local s since left
+  if [ "$S_sp_playing" = 1 ] || [ "$CHARGING" = 1 ]; then s=$POLL_SECONDS
+  else s=$((62 - $(date +%S | sed 's/^0//'))); fi
+  if qr_mode; then
+    read -r since < "$RUN/qr_since"
+    left=$((since + QR_SECONDS - $(date +%s) + 1))
+    [ $left -lt $s ] && s=$left
+  fi
+  [ $s -lt 1 ] && s=1
+  echo $s
+}
+
+poller() {
+  local fails=0 since now ota_req="" act="" sig idle_since pause
+  local ota_at full_at log_at
+  now=$(date +%s)
+  ota_at=$((now + 120))   # primo controllo poco dopo l'avvio
+  full_at=$((now + FULL_REFRESH_MINUTES * 60))
+  log_at=$now
+  idle_since=$now
+  battery_log_trim
+  while true; do
+    light_versions
     if http_get "http://$ARDUINO_HOST/status?v=$VERSION" 8 "$RUN/status.new"; then
       mv "$RUN/status.new" "$RUN/status"
       fails=0
@@ -462,27 +672,51 @@ poller() {
       fails=$((fails + 1))
     fi
 
+    now=$(date +%s)
     if qr_mode; then
       read -r since < "$RUN/qr_since"
-      [ $(($(date +%s) - since)) -ge "$QR_SECONDS" ] && hide_qr
-    else
-      polls=$((polls + 1))
-      if [ $polls -ge $polls_per_full ]; then
-        polls=0
-        full_refresh
-      fi
+      [ $((now - since)) -ge "$QR_SECONDS" ] && hide_qr
+    elif [ $now -ge $full_at ] && ! paused; then
+      full_refresh
+      full_at=$((now + FULL_REFRESH_MINUTES * 60))
     fi
 
     if [ -f "$RUN/status" ]; then
       load_status
+      [ $fails = 0 ] && clock_sync
+      NOW_HM=$(clock_now)
+      battery_update
+      if [ $fails = 0 ]; then
+        if [ -n "$S_lc_ok" ]; then lights_from_status; else sync_lights; fi
+      fi
+      sig=$(activity)
+      [ "$sig" != "$act" ] && act=$sig && idle_since=$now
+    fi
+    if [ -e "$RUN/key_seen" ]; then   # lo crea handle_key a ogni tasto
+      rm -f "$RUN/key_seen"
+      idle_since=$now
+    fi
+
+    if [ "${IDLE_MINUTES:-0}" -gt 0 ] && [ "$CHARGING" != 1 ] && [ "$S_sp_playing" != 1 ] &&
+      ! qr_mode && [ $((now - idle_since)) -ge $((IDLE_MINUTES * 60 - 30)) ]; then
+      pause=1
+    else
+      pause=0
+      pause_end
+    fi
+    if [ -f "$RUN/status" ]; then
       draw_header $([ $fails -ge 3 ] && echo 1 || echo 0)
       draw_weather
       draw_spotify
     fi
     : > "$RUN/alive"   # per ota.sh: il ciclo principale gira
 
+    if [ "${BATTERY_LOG_MINUTES:-0}" -gt 0 ] && [ $now -ge $log_at ]; then
+      battery_log
+      log_at=$((now + BATTERY_LOG_MINUTES * 60))
+    fi
+
     # Aggiornamenti: periodici, o chiesti dalla webapp (ota_req cambia)
-    now=$(date +%s)
     if [ -n "$ota_req" ] && [ "${S_ota_req:-}" != "$ota_req" ]; then ota_at=$now; fi
     ota_req=${S_ota_req:-0}
     if [ "$OTA_ENABLED" = 1 ] && [ "$now" -ge "$ota_at" ]; then
@@ -490,12 +724,12 @@ poller() {
       ota_start
     fi
 
-    # Attesa interrompibile: dopo un comando Spotify si rilegge subito
-    n=0
-    while [ $n -lt $((POLL_SECONDS * TICKS_PER_SEC)) ] && [ ! -e "$RUN/poll_now" ]; do
-      tick; n=$((n + 1))
-    done
-    rm -f "$RUN/poll_now"
+    if [ $pause = 1 ]; then
+      pause_wait
+    else
+      # Attesa interrompibile: dopo un comando Spotify si rilegge subito (poll_now)
+      wait_poll "$(next_poll)"
+    fi
   done
 }
 
@@ -519,7 +753,7 @@ key_reader() { # DEVICE
 }
 
 spotify_cmd() {
-  ( http_get "http://$ARDUINO_HOST/cmd?a=$1" 10 "$RUN/cmd.out"; touch "$RUN/poll_now" ) &
+  ( http_get "http://$ARDUINO_HOST/cmd?a=$1" 10 "$RUN/cmd.out"; poll_now ) &
 }
 
 # La musica suona a casa? (per i tasti ai lati)
@@ -527,6 +761,11 @@ music_at_home() { [ "$(status_value sp_active)" = 1 ]; }
 
 handle_key() { # CODICE VALORE (1 premuto, 2 tenuto premuto)
   [ "$2" = 0 ] && return
+  : > "$RUN/key_seen"        # per la pausa: qualcuno usa il pannello
+  if paused; then            # in pausa un tasto sveglia soltanto
+    [ "$2" = 1 ] && wake_up
+    return
+  fi
   if qr_mode; then           # con i QR a schermo un tasto qualsiasi torna indietro
     [ "$2" = 1 ] && hide_qr
     return
@@ -547,7 +786,7 @@ handle_key() { # CODICE VALORE (1 premuto, 2 tenuto premuto)
     "$KEY_TRACK_PREV") music_at_home && spotify_cmd prev ;;
     "$KEY_PLAY") spotify_cmd toggle ;;
     "$KEY_ALL") toggle_all ;;
-    "$KEY_REFRESH") full_refresh; touch "$RUN/poll_now" ;;
+    "$KEY_REFRESH") full_refresh; poll_now ;;
     "$KEY_QR") show_qr ;;
   esac
 }
@@ -561,21 +800,24 @@ run() {
   rm -f "$RUN"/*
   echo $$ > "$RUN/pid"
   while [ $i -le "$NLIGHTS" ]; do
-    echo 0 > "$RUN/l${i}_on"; echo 50 > "$RUN/l${i}_b"; echo 0 > "$RUN/l${i}_ver"
+    echo 0 > "$RUN/l${i}_on"; echo 50 > "$RUN/l${i}_b"
+    echo 0 > "$RUN/l${i}_ver"; echo 0 > "$RUN/l${i}_sent"
     i=$((i + 1))
   done
   echo 1 > "$RUN/sel"; echo 0 > "$RUN/vol_ver"
 
   /etc/init.d/framework stop >/dev/null 2>&1
   lipc-set-prop com.lab126.powerd preventScreenSaver 1
+  wifi 1   # se il pannello è stato fermato in pausa, il WiFi è ancora spento
   sleep 2
   full_refresh
-  sync_lights
 
+  # FIFO aperte in lettura e scrittura qui, prima dei figli: chi scrive non
+  # si blocca mai, anche se il lettore non è ancora partito
+  mkfifo "$RUN/keys" "$RUN/poll" "$RUN/send"
+  exec 4<> "$RUN/keys" 5<> "$RUN/poll" 6<> "$RUN/send"
   poller & pids="$pids $!"
   sender & pids="$pids $!"
-  mkfifo "$RUN/keys"
-  exec 4<> "$RUN/keys"
   for dev in $INPUT_DEVICES; do
     key_reader "$dev" >&4 & pids="$pids $!"
   done
@@ -608,6 +850,7 @@ kill_panel() {
 
 stop() {
   kill_panel
+  lipc-set-prop com.lab126.cmd wirelessEnable 1   # fermato in pausa: il WiFi era spento
   lipc-set-prop com.lab126.powerd preventScreenSaver 0
   /etc/init.d/framework start >/dev/null 2>&1 &
   echo "Pannello fermato, interfaccia Kindle riavviata"
@@ -643,6 +886,7 @@ preview() {
   fi
   full_refresh
   load_status
+  BATT=$(battery_text)
   draw_header 0
   draw_weather
   draw_spotify

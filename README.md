@@ -194,6 +194,36 @@ seriale (stack e heap liberi).
    `auto` e metti `K3_WIFI_SSHD_ONLY="true"` in `usbnet/etc/config`: parte
    solo SSH e il Kindle resta visibile come disco USB.
 
+## Consumi e pausa
+
+Il pannello tiene il Kindle sempre acceso: senza la sospensione dell'uso
+normale, la batteria dura giorni e non settimane. Il consumo vero è il WiFi,
+molto più dei refresh dello schermo. Per questo:
+- l'ora va avanti con l'orologio interno del Kindle, tarato su quella
+  dell'Arduino a ogni `/status` (il fuso del Kindle non conta);
+- lo stato si chiede all'Arduino una volta al minuto; ogni `POLL_SECONDS`
+  (10 s) solo mentre suona musica o il Kindle è in carica;
+- le luci arrivano dentro `/status` (le legge l'Arduino dallo Shelly); con un
+  gateway vecchio il Kindle le chiede ancora allo Shelly, a ogni `/status`;
+- fuori dalle richieste i processi del pannello dormono, senza risvegli a vuoto;
+- il refresh completo contro il ghosting è ogni 4 ore (`FULL_REFRESH_MINUTES`).
+
+**Pausa.** Se per `IDLE_MINUTES` (10) non cambia niente, il pannello spegne il
+WiFi. "Niente" vuol dire: nessun tasto, luci e musica uguali, nessun brano che
+suona. In pausa l'ora continua ad andare e la fascia in basso dice da quando
+sono fermi i dati. Ogni `SLEEP_CHECK_MINUTES` (15), e a mezzanotte per la
+data, il WiFi si riaccende per un `/status`. Se nel frattempo è cambiato
+qualcosa, per esempio una luce accesa dal telefono, il pannello resta sveglio;
+altrimenti torna in pausa. Un tasto sveglia subito, senza fare altro. In carica
+la pausa non scatta. Prima di spegnere il WiFi il Kindle avvisa il gateway, che
+così non lo segnala come spento (`kindleOnline`). Per disattivarla metti
+`IDLE_MINUTES=0` in `config.sh`.
+
+**Misurare.** Ogni 30 minuti il pannello annota la batteria in
+`/mnt/us/dashboard/battery.log` (`BATTERY_LOG_MINUTES`): secondi, ora, livello,
+e "pausa"/"sveglio" quando cambia stato. Da lì si ricava quanti punti all'ora
+consuma da sveglio e in pausa.
+
 ## Aggiornamenti OTA del Kindle
 
 Il Kindle si aggiorna da solo, ma solo quando pubblichi un **rilascio**, cioè un
@@ -291,9 +321,9 @@ La serve l'UNO R4 su `http://IP_ARDUINO/`, solo in LAN. Si apre anche dal
 secondo QR del Kindle. Mostra ora e meteo, regola le luci (interruttore e
 slider) e comanda Spotify.
 
-Le luci passano dall'Arduino allo Shelly. Il Kindle rilegge lo Shelly ogni 15 s
-(`SHELLY_SYNC_SECONDS`), quindi una modifica dal telefono compare sullo schermo
-entro quel tempo.
+Le luci passano dall'Arduino allo Shelly. Il Kindle rilegge le luci a ogni
+`/status`, quindi una modifica dal telefono compare sullo schermo entro un
+minuto (10 s mentre suona musica).
 
 **Sicurezza.** La webapp non ha password: chiunque sia sulla tua rete può
 accendere le luci. Per gli ospiti conviene una **rete ospiti isolata**: col

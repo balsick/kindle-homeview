@@ -5,6 +5,7 @@
   Open-Meteo in HTTPS e offre al Kindle due endpoint HTTP in chiaro:
 
     GET /status          stato in formato "chiave=valore", una riga per chiave
+                         con le luci; ?sleep=S: il Kindle spegne il WiFi per S secondi
     GET /cmd?a=AZIONE    comando Spotify: toggle | play | pause | next | prev
 
   Serve anche la webapp per il telefono (solo LAN, senza password):
@@ -154,6 +155,7 @@ unsigned long epochAtSync = 0, millisAtSync = 0;
 unsigned long nextSpotifyAt = 0, nextWeatherAt = 0, nextNtpAt = 0;
 String kindleVersion, latestVersion;  // per mostrarli nella webapp
 unsigned long kindleSeenAt = 0;  // ultima richiesta del Kindle a /status
+unsigned long kindleAwayMs = 0;  // il Kindle ha detto che va in pausa (WiFi spento) per tanto
 unsigned otaRequests = 0;         // il Kindle controlla quando il valore cambia
 
 bool due(unsigned long at) { return (long)(millis() - at) >= 0; }
@@ -693,8 +695,17 @@ String decimalComma(float v) {
 }
 
 String buildStatus() {
+  // Le luci dallo Shelly, così il Kindle non deve chiederle lui. Si leggono
+  // prima di comporre la risposta, per non avere insieme il WiFiClient da 1 KB
+  // e il buffer della risposta. Se lo Shelly non risponde ci si ferma: lc_ok=0
+  // e niente chiavi lcN.
+  bool on[NUM_LIGHTS];
+  int bright[NUM_LIGHTS];
+  bool lightsOk = true;
+  for (int i = 0; i < NUM_LIGHTS && lightsOk; i++) lightsOk = shellyGetLight(LIGHTS[i].id, on[i], bright[i]);
+
   String s;
-  s.reserve(700);
+  s.reserve(800);
   long today = -1;
   String time = "--:--", date;
   localClock(today, time, date);
@@ -725,6 +736,16 @@ String buildStatus() {
   kv(s, "sp_device", sp.device);
   kv(s, "sp_volume", String(sp.volume));
   kv(s, "ota_req", String(otaRequests));
+
+  // lcN=acceso|luminosità, N è il canale Shelly (LIGHT_IDS sul Kindle)
+  kv(s, "lc_ok", lightsOk ? "1" : "0");
+  if (lightsOk) {
+    for (int i = 0; i < NUM_LIGHTS; i++) {
+      char key[6];
+      snprintf(key, sizeof(key), "lc%d", LIGHTS[i].id);
+      kv(s, key, String(on[i] ? "1|" : "0|") + bright[i]);
+    }
+  }
   return s;
 }
 
@@ -919,6 +940,9 @@ void handleClient() {
     String v = queryParam(path, "v");  // versione in uso sul Kindle
     if (releaseNumber(v) >= 0) kindleVersion = v;
     kindleSeenAt = millis();
+    // sleep=SECONDI: il Kindle sta per spegnere il WiFi per tanto (pausa),
+    // quindi nel frattempo non va segnalato come spento
+    kindleAwayMs = constrain(queryParam(path, "sleep").toInt(), 0L, 24L * 3600) * 1000UL;
     sendText(c, 200, buildStatus());
   } else if (path == "/ota/version") {
     sendLatestVersion(c);
@@ -1040,7 +1064,7 @@ void updateDiagnostics() {
                    " B usati, " + String(mi.fordblks) + " B liberi nell'arena");
   }
   spotifyOk = sp.configured && sp.ok;
-  kindleOnline = kindleSeenAt != 0 && millis() - kindleSeenAt < KINDLE_TIMEOUT_MS;
+  kindleOnline = kindleSeenAt != 0 && millis() - kindleSeenAt < KINDLE_TIMEOUT_MS + kindleAwayMs;
 }
 
 // ---- Stack ----

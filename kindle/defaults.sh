@@ -37,12 +37,17 @@ KEY_QR=102        # Home: QR del WiFi ospiti e della webapp
 # Legenda nella fascia in basso: cambia se la musica suona a casa o no
 LEGEND_MUSIC="lati: volume · brani  ·  ↩ pausa  ·  ⌨ luci  ·  ⌂ QR"
 LEGEND_IDLE="↩ musica a casa  ·  ⌨ tutte le luci  ·  ⌂ WiFi ospiti"
+LEGEND_PAUSE="premi un tasto"
 QR_SECONDS=120    # dopo quanto la schermata dei QR si chiude da sola
 BATTERY_LOW=20    # sotto questa percentuale la batteria è in grassetto
 
-POLL_SECONDS=5          # ogni quanto chiedere lo stato all'Arduino
-SHELLY_SYNC_SECONDS=15  # ogni quanto rileggere le luci (cambiate da webapp o app Shelly)
-FULL_REFRESH_MINUTES=30 # refresh completo periodico contro il ghosting
+# Consumi. Il WiFi è la voce più pesante: si chiede lo stato all'Arduino una
+# volta al minuto (allo scatto dell'ora), più spesso solo con la musica o in carica.
+POLL_SECONDS=10          # con la musica che suona o in carica: ogni quanto chiedere lo stato
+FULL_REFRESH_MINUTES=240 # refresh completo periodico contro il ghosting
+IDLE_MINUTES=10          # senza cambiamenti per tanto, pausa: WiFi spento (0 = mai)
+SLEEP_CHECK_MINUTES=15   # in pausa: ogni quanto riaccendere il WiFi per controllare
+BATTERY_LOG_MINUTES=30   # ogni quanto annotare la batteria in battery.log (0 = mai)
 
 # Aggiornamenti OTA da GitHub, tramite l'Arduino (vedi ota.sh)
 OTA_ENABLED=1
