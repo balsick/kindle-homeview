@@ -18,6 +18,18 @@ jobs:
           done
       - name: Python syntax
         run: python3 -m py_compile tools/*.py
+      - name: Icon font has every icon of the table
+        run: |
+          pip install -q fonttools
+          sh kindle/icons-font.sh > /tmp/icons.ttf
+          python3 - <<'PY'
+          import re, sys
+          from fontTools.ttLib import TTFont
+          have = TTFont("/tmp/icons.ttf").getBestCmap()
+          table = re.findall(r"^I_\w+=(\S)\s+#", open("kindle/dashboard.sh").read(), re.M)
+          missing = [c for c in table if ord(c) not in have]
+          sys.exit(f"Run tools/make_icons.py: missing {missing}" if missing else 0)
+          PY
 
   sketch:
     runs-on: ubuntu-latest

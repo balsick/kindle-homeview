@@ -6,4 +6,5 @@ defaults.sh
 dashboard.sh
 ota.sh
 ota-files
+icons-font.sh
 # ota:end

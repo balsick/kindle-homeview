@@ -273,6 +273,24 @@ image() {
   fi
 }
 
+# The icon font comes with OTA updates as icons-font.sh (see make_icons.py):
+# fonts/icons.ttf is rewritten when its id changes, and only if complete.
+install_icons() {
+  local src="$DIR/icons-font.sh" out="$DIR/fonts/icons.ttf" id old="" size
+  [ -f "$src" ] || return 0
+  id=$(sed -n 's/^# id: //p' "$src")
+  [ -f "$out.id" ] && read -r old < "$out.id"
+  [ -n "$id" ] && [ "$id" != "$old" ] || return 0
+  mkdir -p "$DIR/fonts"
+  sh "$src" > "$out.tmp" 2>/dev/null
+  size=$(wc -c < "$out.tmp")
+  if [ $((size + 0)) = "${id#* }" ]; then
+    mv "$out.tmp" "$out" && echo "$id" > "$out.id"
+  else
+    rm -f "$out.tmp"
+  fi
+}
+
 full_refresh() {
   rm -f "$RUN"/cache_*
   fb -c -f
@@ -1050,6 +1068,7 @@ run() {
   /etc/init.d/framework stop >/dev/null 2>&1
   lipc-set-prop com.lab126.powerd preventScreenSaver 1
   wifi 1   # if the panel was stopped while paused, WiFi is still off
+  install_icons
   sleep 2
   full_refresh
 
