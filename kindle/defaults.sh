@@ -8,6 +8,8 @@ SHELLY_HOST="192.168.1.50"    # IP of the Shelly Plus RGBW PM ("light" profile, 
 # The lights, in the same order in all the lines below.
 LIGHT_IDS="0 1 2"                                 # Shelly channel (0-3)
 LIGHT_NAMES="Soggiorno|Cucina|Studio"
+# Icons, from the I_ table in dashboard.sh: bulb sofa kitchen desk ceiling floor bed tv strip
+LIGHT_ICONS="sofa kitchen desk"
 STEP=10                                           # brightness step in %
 VOLUME_STEP=10                                    # Spotify volume step in %
 
@@ -16,7 +18,7 @@ VOLUME_STEP=10                                    # Spotify volume step in %
 # them in config.sh.
 INPUT_DEVICES="/dev/input/event0 /dev/input/event1"
 
-# Joystick: the lights. ▲▼ picks the light, ◀▶ brightness, center on/off
+# Joystick: the lights. ◀▶ picks the light, ▲▼ brightness, center on/off
 KEY_UP=103
 KEY_DOWN=108
 KEY_LEFT=105
@@ -34,9 +36,10 @@ KEY_ALL=29        # Keyboard: switches all lights off / back on
 KEY_REFRESH=139   # Menu: full screen refresh
 KEY_QR=102        # Home: QR codes for the guest WiFi and the webapp
 
-# Legend in the bottom strip: changes depending on whether music plays at home
-LEGEND_MUSIC="lati: volume · brani  ·  ↩ pausa  ·  ⌨ luci  ·  ⌂ QR"
-LEGEND_IDLE="↩ musica a casa  ·  ⌨ tutte le luci  ·  ⌂ WiFi ospiti"
+# Legend in the bottom strip: changes depending on whether music plays at home.
+# "icon label" pairs separated by ";", the icons from the I_ table in dashboard.sh.
+LEGEND_KEYS_MUSIC="lr luce;ud intensità;center on/off;keyboard tutte;back pausa;home ospiti"
+LEGEND_KEYS_IDLE="lr luce;ud intensità;center on/off;keyboard tutte;back musica;home ospiti"
 LEGEND_PAUSE="premi un tasto"
 QR_SECONDS=120    # after how long the QR screen closes by itself
 BATTERY_LOW=20    # below this percentage the battery is shown in bold
@@ -58,4 +61,5 @@ OTA_HEALTH_SECONDS=45   # how long the new version has to prove it works
 FBINK="$DIR/bin/fbink"
 FONT="$DIR/fonts/DejaVuSans.ttf"
 FONT_BOLD="$DIR/fonts/DejaVuSans-Bold.ttf"
+FONT_ICONS="$DIR/fonts/icons.ttf"   # made by tools/make_icons.py
 # ota:end

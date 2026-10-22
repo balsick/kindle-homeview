@@ -9,7 +9,7 @@ Arduino Cloud device, tells you when the power goes out.
 
 > **Language.** Code and docs are in English; the text shown on the Kindle and
 > in the webapp is in Italian. The on-screen strings live in
-> `kindle/dashboard.sh`, `kindle/defaults.sh` (`LEGEND_*`),
+> `kindle/dashboard.sh`, `kindle/defaults.sh` (`LEGEND_KEYS_*`),
 > `arduino/kindle_gateway/webapp.h` and the date/weather tables at the top of
 > `kindle_gateway.ino`, if you want to translate them.
 
@@ -32,6 +32,7 @@ Spotify, Open-Meteo ◄─HTTPS── UNO R4 WiFi ──► Arduino Cloud (notif
 | `kindle/` | Panel scripts, to copy into `/mnt/us/dashboard/` on the Kindle |
 | `tools/get_spotify_token.py` | Gets the Spotify refresh token (once, on your computer) |
 | `tools/make_qr.py` | Generates the QR codes for the guest WiFi and the webapp |
+| `tools/make_icons.py` | Generates the icon font used on the Kindle screen |
 | `tools/release_kindle.sh` | Publishes an OTA update for the Kindle (`kindle-vN` tag) |
 | `tools/preview.py` | Previews the Kindle screen on your computer |
 | `tools/webapp_dev.py` | Previews the webapp in the browser, with fake APIs |
@@ -43,8 +44,8 @@ at home.
 
 | Key | Action |
 |---|---|
-| Joystick up / down | Picks the light (black bar to the left of the row) |
-| Joystick left / right | Brightness of the selected light − / + |
+| Joystick left / right | Picks the light (the tile with the thick black frame) |
+| Joystick up / down | Brightness of the selected light + / − |
 | Joystick center | Switches the selected light on / off |
 | Left page keys (forward / back) | Volume + / − |
 | Right page keys (forward / back) | Next / previous track |
@@ -63,8 +64,13 @@ there's nothing to resume, `SPOTIFY_FALLBACK_CONTEXT` starts, if set.
 With the QR codes on screen any key goes back to the panel without doing
 anything else. The screen also closes by itself after 2 minutes
 (`QR_SECONDS`). The bottom strip summarizes the keys and changes depending on
-whether music is playing (`LEGEND_MUSIC`, `LEGEND_IDLE` in `defaults.sh`, can
-be redefined in `config.sh`).
+whether music is playing (`LEGEND_KEYS_MUSIC`, `LEGEND_KEYS_IDLE` in
+`defaults.sh`, can be redefined in `config.sh`). While music plays, small icons
+on the edges of the screen, next to the page keys, show what they do.
+
+Each light is a tile: the gray fills it from the bottom as far as the
+brightness. Its icon is set in `LIGHT_ICONS` (`sofa`, `kitchen`, `desk`,
+`bulb`, `ceiling`, `floor`, `bed`, `tv`, `strip`).
 
 Holding down brightness or volume keeps changing the value. Only the last
 value is sent to the Shelly and to Spotify, once the keys stop (debounce).
@@ -167,7 +173,14 @@ If you change the sketch, watch the `Memory:` line it prints on serial every
    framebuffer from the `.raw` files made by `make_qr.py`.
 4. **Fonts.** Copy `DejaVuSans.ttf` and `DejaVuSans-Bold.ttf` to
    `/mnt/us/dashboard/fonts/`. Other fonts work too, just point to them in
-   `config.sh` (`FONT`, `FONT_BOLD`).
+   `config.sh` (`FONT`, `FONT_BOLD`). For the icons, run
+   `python3 tools/make_icons.py` on your computer (needs `pip install
+   fonttools`) and copy the `kindle/fonts/icons.ttf` it creates there too.
+   It holds only the ~60 icons the panel uses, taken from
+   [Material Design Icons](https://pictogrammers.com/library/mdi/) (Apache
+   2.0) and moved onto plain letters, so the shell scripts and FBInk only deal
+   with ASCII. Without it the panel works the same, just without icons. OTA
+   updates don't touch fonts: if a release adds icons, regenerate it.
 5. Copy the files listed in `kindle/ota-files` to `/mnt/us/dashboard/`:
    `lib.sh`, `defaults.sh`, `dashboard.sh`, `ota.sh` and `ota-files`. Then copy
    `kindle/config.example.sh` as `config.sh` and set the IPs and light names.
@@ -364,8 +377,22 @@ python3 tools/preview.py --screen qr   # QR screen (preview-qr.png)
 
 The preview runs the real `dashboard.sh` and intercepts the calls to FBInk.
 The layout is changed in `dashboard.sh`:
-- zone coordinates (`HDR_Y`, `WX_Y`, …);
-- the `draw_*` functions.
+- zone coordinates (`CLK_Y`, `WX_Y`, …);
+- the `draw_*` functions;
+- the icon table (`I_name=character  # mdi-name`), from which
+  `make_icons.py` builds the font.
+
+What KOReader's FBInk can draw, and what the panel uses:
+- TrueType text (`-t`) in any font, black, white or one of 14 grays
+  (`-C GRAY1` … `GRAYE`), without background (`-O`) so it can sit on boxes;
+- filled rectangles in the same 16 colors (`-k` with `-B`): lines, tiles,
+  the progress bar, the "cover" of the music;
+- icons, as text in an icon font;
+- no images (PNG/JPEG): that's why the QR codes are copied into the
+  framebuffer from `.raw` files.
+
+The preview follows FBInk's font size (`px` is the height from ascender to
+descender) and grays; the gray levels on e-ink look a bit different.
 
 Sample data is in `tools/sample_status.txt`. `--lights` changes the light
 states, for example `--lights "1:100 0:50 1:20"`.
