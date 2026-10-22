@@ -842,8 +842,15 @@ start() {
   echo "Pannello avviato (log in /tmp/dashboard.log)"
 }
 
+# Uccide il processo principale e poi tutti gli altri "dashboard.sh run":
+# uccidendo solo il principale, a ogni riavvio restavano vivi i vecchi
+# lettori dei tasti. Il ps del Kindle è quello di procps, quindi -ef funziona.
 kill_panel() {
+  local p
   [ -f "$RUN/pid" ] && kill "$(cat "$RUN/pid")" 2>/dev/null
+  for p in $(ps -ef | sed -n 's/^[^ ]* *\([0-9]*\) .*dashboard\.sh run$/\1/p'); do
+    kill "$p" 2>/dev/null
+  done
   rm -f "$RUN/pid"
   sleep 1
 }
